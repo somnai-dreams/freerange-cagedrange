@@ -107,18 +107,16 @@ export function runFileAudit(file: string): boolean {
 }
 
 // `fr --spacing`: the spacing ownership scan at project scope. The scan reads syntax
-// only, so the file list comes from the tsconfig graph without creating TypeScript
-// programs, and files with type errors still scan. The command is informational and
-// never fails.
+// only. A TypeScript Program resolves the tsconfig's complete imported source set, but
+// no checker or diagnostics are requested, so files with type errors still scan. The
+// command is informational and never fails on findings.
 export function runProjectSpacing(searchFrom: string): boolean {
   const configPath = findTypeScriptConfig(searchFrom)
   if (configPath == null) {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
   }
   const {fileNames, rootOptions} = projectFileNames(configPath)
-  const scans = fileNames
-    .filter(file => !file.endsWith('.d.ts'))
-    .map(scanSpacingPath)
+  const scans = fileNames.map(scanSpacingPath)
   console.log(formatSpacingReport(scans, usePrettyOutput(rootOptions['pretty'])))
   return false
 }

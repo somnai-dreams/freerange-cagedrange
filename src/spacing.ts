@@ -30,7 +30,15 @@ import {formatDiagnosticPrefix, type DiagnosticLevel} from './typescript/diagnos
 
 export type SpacingAxis = 'vertical' | 'horizontal'
 
-export type OffsetProperty = 'top' | 'bottom' | 'left' | 'right'
+export type OffsetProperty =
+  | 'top'
+  | 'bottom'
+  | 'left'
+  | 'right'
+  | 'blockStart'
+  | 'blockEnd'
+  | 'inlineStart'
+  | 'inlineEnd'
 
 export type SpacingFinding = {
   // 1-based, pointing at the element's opening tag.
@@ -174,7 +182,7 @@ function scanElement(
   sourceFile: ts.SourceFile,
 ): SpacingFinding[] | null {
   let styleScan: StyleScan | null = null
-  let classes: ExtractedClasses = {tokens: [], complete: true}
+  let classes = emptyExtractedClasses()
   let hasSpreadAttribute = false
 
   for (const attribute of element.attributes.properties) {
@@ -212,7 +220,7 @@ function scanElement(
     return found
   }
 
-  const tokens = classes.tokens.flatMap(token => {
+  const tokens = classes.possibleTokens.flatMap(token => {
     const classified = classifyToken(token)
     return classified == null ? [] : [classified]
   })
@@ -221,11 +229,14 @@ function scanElement(
     if (styleScan.positioned === 'computed') {
       add({kind: 'unscannable', cause: 'computedPosition'})
     } else {
-      const status = styleScan.positioned ?? positionStatusFromClasses(tokens)
+      const positioned = styleScan.positioned == null
+        ? classes.positionedOnEveryBranch
+        : styleScan.positioned !== 'none'
       // Proving the offset dead needs the full class list: with parts of the className
       // unseen, a positioning class may be hiding there, so the check stands down and
-      // the partial note below covers the element.
-      if (status === 'none' && (styleScan.positioned != null || classes.complete)) {
+      // the partial note below covers the element. Possible conditional position classes
+      // do not prove anything: every className branch must position the element.
+      if (!positioned && (styleScan.positioned != null || classes.allTokensKnown)) {
         const staticClass = tokens.find(token =>
           token.kind === 'position' && token.status === 'none' && !token.variantPrefixed)
         add({
@@ -260,8 +271,8 @@ function scanElement(
 
   // The honesty note prints after the findings: the checks above covered the visible
   // classes, and this line marks that unseen ones exist.
-  if (!classes.complete) {
-    add({kind: 'unscannable', cause: classes.tokens.length > 0 ? 'partialClassName' : 'computedClassName'})
+  if (!classes.allTokensKnown) {
+    add({kind: 'unscannable', cause: classes.possibleTokens.length > 0 ? 'partialClassName' : 'computedClassName'})
   }
 
   return found
@@ -368,20 +379,18 @@ function ownedSpacingForProperty(name: string): OwnedSpacing | null {
       return {mechanism: 'positionOffset', styleProperty: name, properties: [name]}
     case 'inset':
       return {mechanism: 'positionOffset', styleProperty: name, properties: ['top', 'bottom', 'left', 'right']}
-    // Logical inset and margin properties map to their physical horizontal-writing-mode,
-    // left-to-right equivalents; the scan does not model writing modes.
     case 'insetBlock':
-      return {mechanism: 'positionOffset', styleProperty: name, properties: ['top', 'bottom']}
+      return {mechanism: 'positionOffset', styleProperty: name, properties: ['blockStart', 'blockEnd']}
     case 'insetBlockStart':
-      return {mechanism: 'positionOffset', styleProperty: name, properties: ['top']}
+      return {mechanism: 'positionOffset', styleProperty: name, properties: ['blockStart']}
     case 'insetBlockEnd':
-      return {mechanism: 'positionOffset', styleProperty: name, properties: ['bottom']}
+      return {mechanism: 'positionOffset', styleProperty: name, properties: ['blockEnd']}
     case 'insetInline':
-      return {mechanism: 'positionOffset', styleProperty: name, properties: ['left', 'right']}
+      return {mechanism: 'positionOffset', styleProperty: name, properties: ['inlineStart', 'inlineEnd']}
     case 'insetInlineStart':
-      return {mechanism: 'positionOffset', styleProperty: name, properties: ['left']}
+      return {mechanism: 'positionOffset', styleProperty: name, properties: ['inlineStart']}
     case 'insetInlineEnd':
-      return {mechanism: 'positionOffset', styleProperty: name, properties: ['right']}
+      return {mechanism: 'positionOffset', styleProperty: name, properties: ['inlineEnd']}
     case 'marginTop':
     case 'marginBottom':
     case 'marginBlock':
@@ -401,25 +410,89 @@ function ownedSpacingForProperty(name: string): OwnedSpacing | null {
   }
 }
 
-// The class tokens statically visible in a className value, and whether that is all of
-// them. A plain string is complete; a cn(...) call or template with dynamic parts
-// yields the tokens the scan can see, with complete false so the checks that need the
-// full list (proving an element unpositioned) know to stand down.
-type ExtractedClasses = {tokens: string[]; complete: boolean}
+// Possible tokens serve conflict checks and the distribution. Completeness controls
+// whether the scan can issue a no-position warning. Truthiness and positioning facts
+// preserve reachable results through short-circuit expressions, while merge effects
+// model twMerge replacing an earlier position utility.
+type ExtractedClasses = {
+  possibleTokens: string[]
+  allTokensKnown: boolean
+  canBeFalsy: boolean
+  canBeTruthy: boolean
+  positionedOnEveryBranch: boolean
+  positionedWhenTruthy: boolean
+  mergePositionEffects: MergePositionEffect[]
+}
+
+function emptyExtractedClasses(): ExtractedClasses {
+  return {
+    possibleTokens: [],
+    allTokensKnown: true,
+    canBeFalsy: true,
+    canBeTruthy: false,
+    positionedOnEveryBranch: false,
+    positionedWhenTruthy: true,
+    mergePositionEffects: ['none'],
+  }
+}
+
+function unknownExtractedClasses(): ExtractedClasses {
+  return {
+    possibleTokens: [],
+    allTokensKnown: false,
+    canBeFalsy: true,
+    canBeTruthy: true,
+    positionedOnEveryBranch: false,
+    positionedWhenTruthy: false,
+    mergePositionEffects: ['none', 'positioned', 'static'],
+  }
+}
+
+function literalExtractedClasses(text: string): ExtractedClasses {
+  return extractedClassesFromTokens(splitClassTokens(text), text === '')
+}
+
+function extractedClassesFromTokens(possibleTokens: string[], emptyValue = possibleTokens.length === 0): ExtractedClasses {
+  const classified = possibleTokens.flatMap(token => {
+    const result = classifyToken(token)
+    return result == null ? [] : [result]
+  })
+  const positioned = positionStatusFromClasses(classified) !== 'none'
+  return {
+    possibleTokens,
+    allTokensKnown: true,
+    canBeFalsy: emptyValue,
+    canBeTruthy: !emptyValue,
+    positionedOnEveryBranch: !emptyValue && positioned,
+    positionedWhenTruthy: emptyValue || positioned,
+    mergePositionEffects: [lastMergePositionEffect(classified)],
+  }
+}
+
+type MergePositionEffect = 'none' | 'positioned' | 'static'
+
+function lastMergePositionEffect(tokens: ClassToken[]): MergePositionEffect {
+  let effect: MergePositionEffect = 'none'
+  for (const token of tokens) {
+    if (token.kind !== 'position' || token.variantPrefixed) continue
+    effect = token.status === 'none' ? 'static' : 'positioned'
+  }
+  return effect
+}
 
 function classAttributeTokens(attribute: ts.JsxAttribute): ExtractedClasses {
   const initializer = attribute.initializer
   // A bare `className` attribute carries no classes.
-  if (initializer == null) return {tokens: [], complete: true}
-  if (ts.isStringLiteral(initializer)) return {tokens: splitClassTokens(initializer.text), complete: true}
+  if (initializer == null) return emptyExtractedClasses()
+  if (ts.isStringLiteral(initializer)) return literalExtractedClasses(initializer.text)
   if (ts.isJsxExpression(initializer)) {
     const expression = initializer.expression
-    if (expression == null) return {tokens: [], complete: false}
+    if (expression == null) return unknownExtractedClasses()
     const extracted = extractClassExpression(expression)
     // Branches repeating a token (cond ? 'absolute mt-2' : 'absolute mt-4') fold it.
-    return {tokens: [...new Set(extracted.tokens)], complete: extracted.complete}
+    return {...extracted, possibleTokens: [...new Set(extracted.possibleTokens)]}
   }
-  return {tokens: [], complete: false}
+  return unknownExtractedClasses()
 }
 
 function splitClassTokens(text: string): string[] {
@@ -435,69 +508,166 @@ const classCombinerNames = new Set(['cn', 'clsx', 'cx', 'classnames', 'twmerge',
 // Extracts the statically visible class tokens from a className expression. Alternatives
 // (ternaries, &&, ||) contribute the tokens of every branch: a conditional margin is
 // still a spacing system on the element, the same reading variant prefixes get. Unknown
-// parts (identifiers, prop passthroughs, unrecognized calls) contribute nothing and
-// clear the complete flag.
+// parts (identifiers, prop passthroughs, unrecognized calls) contribute nothing and mark
+// the possible-token set incomplete.
 function extractClassExpression(expression: ts.Expression): ExtractedClasses {
   if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
-    return {tokens: splitClassTokens(expression.text), complete: true}
+    return literalExtractedClasses(expression.text)
   }
   if (ts.isParenthesizedExpression(expression)) return extractClassExpression(expression.expression)
   if (ts.isTemplateExpression(expression)) return extractFromPieces(templatePieces(expression))
   if (ts.isConditionalExpression(expression)) {
-    return unionExtracted(extractClassExpression(expression.whenTrue), extractClassExpression(expression.whenFalse))
+    const condition = staticTruthiness(expression.condition)
+    if (condition === 'truthy') return extractClassExpression(expression.whenTrue)
+    if (condition === 'falsy') return extractClassExpression(expression.whenFalse)
+    return alternateExtracted(extractClassExpression(expression.whenTrue), extractClassExpression(expression.whenFalse))
   }
   if (ts.isBinaryExpression(expression)) {
     switch (expression.operatorToken.kind) {
       case ts.SyntaxKind.PlusToken:
         return extractFromPieces(concatPieces(expression))
       // The left of && is a condition; the value is either falsy (no classes) or the
-      // right side, so the right side's tokens and completeness carry over.
-      case ts.SyntaxKind.AmpersandAmpersandToken:
-        return extractClassExpression(expression.right)
-      case ts.SyntaxKind.BarBarToken:
-      case ts.SyntaxKind.QuestionQuestionToken:
-        return unionExtracted(extractClassExpression(expression.left), extractClassExpression(expression.right))
+      // right side. The right-side tokens are possible, but only a statically truthy
+      // condition makes their positioning guarantee unconditional.
+      case ts.SyntaxKind.AmpersandAmpersandToken: {
+        const left = staticTruthiness(expression.left)
+        if (left === 'truthy') return extractClassExpression(expression.right)
+        if (left === 'falsy') return emptyExtractedClasses()
+        return andExtracted(extractClassExpression(expression.left), extractClassExpression(expression.right))
+      }
+      case ts.SyntaxKind.BarBarToken: {
+        const left = staticTruthiness(expression.left)
+        if (left === 'truthy') return extractClassExpression(expression.left)
+        if (left === 'falsy') return extractClassExpression(expression.right)
+        return orExtracted(extractClassExpression(expression.left), extractClassExpression(expression.right))
+      }
+      case ts.SyntaxKind.QuestionQuestionToken: {
+        return extractNullishCoalescing(expression.left, expression.right)
+      }
       default:
-        return {tokens: [], complete: false}
+        return unknownExtractedClasses()
     }
   }
   if (ts.isCallExpression(expression) && ts.isIdentifier(expression.expression)
     && classCombinerNames.has(expression.expression.text.toLowerCase())) {
-    let combined: ExtractedClasses = {tokens: [], complete: true}
+    let combined = emptyExtractedClasses()
     for (const argument of expression.arguments) {
-      combined = unionExtracted(combined, extractCombinerArgument(argument))
+      combined = concatenateExtracted(combined, extractCombinerArgument(argument))
+    }
+    if (expression.expression.text.toLowerCase() === 'twmerge') {
+      const positionedWhenTruthy = combined.positionedWhenTruthy
+        && !combined.mergePositionEffects.includes('static')
+      return {
+        ...combined,
+        positionedOnEveryBranch: !combined.canBeFalsy && positionedWhenTruthy,
+        positionedWhenTruthy,
+      }
     }
     return combined
   }
-  return {tokens: [], complete: false}
+  if (isEmptyClassValue(expression)) return emptyExtractedClasses()
+  return unknownExtractedClasses()
+}
+
+type StaticTruthiness = 'truthy' | 'falsy' | 'unknown'
+
+function staticTruthiness(expression: ts.Expression): StaticTruthiness {
+  if (ts.isParenthesizedExpression(expression)) return staticTruthiness(expression.expression)
+  if (expression.kind === ts.SyntaxKind.TrueKeyword) return 'truthy'
+  if (expression.kind === ts.SyntaxKind.FalseKeyword || expression.kind === ts.SyntaxKind.NullKeyword) return 'falsy'
+  if (ts.isVoidExpression(expression)) return 'falsy'
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return expression.text === '' ? 'falsy' : 'truthy'
+  }
+  if (ts.isNumericLiteral(expression)) return Number(expression.text) === 0 ? 'falsy' : 'truthy'
+  if (ts.isPrefixUnaryExpression(expression)
+    && (expression.operator === ts.SyntaxKind.PlusToken || expression.operator === ts.SyntaxKind.MinusToken)
+    && ts.isNumericLiteral(expression.operand)) {
+    return Number(expression.operand.text) === 0 ? 'falsy' : 'truthy'
+  }
+  return 'unknown'
+}
+
+type StaticNullishness = 'nullish' | 'present' | 'unknown'
+
+function extractNullishCoalescing(leftExpression: ts.Expression, rightExpression: ts.Expression): ExtractedClasses {
+  if (ts.isParenthesizedExpression(leftExpression)) {
+    return extractNullishCoalescing(leftExpression.expression, rightExpression)
+  }
+  if (ts.isConditionalExpression(leftExpression)) {
+    const condition = staticTruthiness(leftExpression.condition)
+    if (condition === 'truthy') return extractNullishCoalescing(leftExpression.whenTrue, rightExpression)
+    if (condition === 'falsy') return extractNullishCoalescing(leftExpression.whenFalse, rightExpression)
+    return alternateExtracted(
+      extractNullishCoalescing(leftExpression.whenTrue, rightExpression),
+      extractNullishCoalescing(leftExpression.whenFalse, rightExpression),
+    )
+  }
+  const nullishness = staticNullishness(leftExpression)
+  if (nullishness === 'present') return extractClassExpression(leftExpression)
+  if (nullishness === 'nullish') return extractClassExpression(rightExpression)
+  const extracted = alternateExtracted(
+    extractClassExpression(leftExpression),
+    extractClassExpression(rightExpression),
+  )
+  // Without type information an arbitrary expression may be nullish or present. The
+  // alternatives expose possible tokens, but their reachability is not known well
+  // enough to issue the no-position warning.
+  return {...extracted, allTokensKnown: false}
+}
+
+function staticNullishness(expression: ts.Expression): StaticNullishness {
+  if (ts.isParenthesizedExpression(expression)) return staticNullishness(expression.expression)
+  if (expression.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(expression)) return 'nullish'
+  if (expression.kind === ts.SyntaxKind.TrueKeyword
+    || expression.kind === ts.SyntaxKind.FalseKeyword
+    || ts.isStringLiteral(expression)
+    || ts.isNoSubstitutionTemplateLiteral(expression)
+    || ts.isNumericLiteral(expression)) return 'present'
+  return 'unknown'
+}
+
+function isEmptyClassValue(expression: ts.Expression): boolean {
+  return expression.kind === ts.SyntaxKind.FalseKeyword
+    || expression.kind === ts.SyntaxKind.NullKeyword
+    || ts.isVoidExpression(expression)
 }
 
 // One argument of a cn(...)-style call. Arguments are joined with spaces, so tokens
 // never fuse across them. Objects contribute their keys (clsx includes a key when its
-// value is truthy), arrays flatten, and literal non-strings (false, null, undefined)
+// value is truthy), arrays flatten, and literal non-strings (false, null, `void 0`)
 // contribute nothing while staying complete.
 function extractCombinerArgument(argument: ts.Expression): ExtractedClasses {
-  if (ts.isSpreadElement(argument)) return {tokens: [], complete: false}
+  if (ts.isSpreadElement(argument)) return unknownExtractedClasses()
   if (ts.isObjectLiteralExpression(argument)) {
-    let combined: ExtractedClasses = {tokens: [], complete: true}
+    let combined = emptyExtractedClasses()
     for (const member of argument.properties) {
       if (!ts.isPropertyAssignment(member) && !ts.isShorthandPropertyAssignment(member)) {
-        combined = {tokens: combined.tokens, complete: false}
+        combined = {...combined, allTokensKnown: false}
         continue
       }
+      const truthiness = ts.isPropertyAssignment(member) ? staticTruthiness(member.initializer) : 'unknown'
+      if (truthiness === 'falsy') continue
       const name = member.name
+      let extracted: ExtractedClasses
       if (ts.isIdentifier(name) || ts.isStringLiteral(name)) {
-        combined = unionExtracted(combined, {tokens: splitClassTokens(name.text), complete: true})
+        extracted = literalExtractedClasses(name.text)
       } else if (ts.isComputedPropertyName(name)) {
-        combined = unionExtracted(combined, extractClassExpression(name.expression))
+        extracted = extractClassExpression(name.expression)
+      } else {
+        continue
       }
+      const contribution = truthiness === 'truthy'
+        ? extracted
+        : alternateExtracted(emptyExtractedClasses(), extracted)
+      combined = concatenateExtracted(combined, contribution)
     }
     return combined
   }
   if (ts.isArrayLiteralExpression(argument)) {
-    let combined: ExtractedClasses = {tokens: [], complete: true}
+    let combined = emptyExtractedClasses()
     for (const element of argument.elements) {
-      combined = unionExtracted(combined, extractCombinerArgument(element))
+      combined = concatenateExtracted(combined, extractCombinerArgument(element))
     }
     return combined
   }
@@ -505,14 +675,96 @@ function extractCombinerArgument(argument: ts.Expression): ExtractedClasses {
     || argument.kind === ts.SyntaxKind.FalseKeyword
     || argument.kind === ts.SyntaxKind.NullKeyword
     || ts.isNumericLiteral(argument)
-    || (ts.isIdentifier(argument) && argument.text === 'undefined')) {
-    return {tokens: [], complete: true}
+    || ts.isVoidExpression(argument)) {
+    return emptyExtractedClasses()
   }
   return extractClassExpression(argument)
 }
 
-function unionExtracted(left: ExtractedClasses, right: ExtractedClasses): ExtractedClasses {
-  return {tokens: [...left.tokens, ...right.tokens], complete: left.complete && right.complete}
+function alternateExtracted(left: ExtractedClasses, right: ExtractedClasses): ExtractedClasses {
+  return {
+    possibleTokens: [...left.possibleTokens, ...right.possibleTokens],
+    allTokensKnown: left.allTokensKnown && right.allTokensKnown,
+    canBeFalsy: left.canBeFalsy || right.canBeFalsy,
+    canBeTruthy: left.canBeTruthy || right.canBeTruthy,
+    positionedOnEveryBranch: left.positionedOnEveryBranch && right.positionedOnEveryBranch,
+    positionedWhenTruthy: left.positionedWhenTruthy && right.positionedWhenTruthy,
+    mergePositionEffects: unionMergePositionEffects(left.mergePositionEffects, right.mergePositionEffects),
+  }
+}
+
+function concatenateExtracted(left: ExtractedClasses, right: ExtractedClasses): ExtractedClasses {
+  const canBeFalsy = left.canBeFalsy && right.canBeFalsy
+  const canBeTruthy = left.canBeTruthy || right.canBeTruthy
+  const positionedWhenTruthy = (!left.canBeTruthy || left.positionedWhenTruthy || right.positionedOnEveryBranch)
+    && (!right.canBeTruthy || right.positionedWhenTruthy || left.positionedOnEveryBranch)
+  return {
+    possibleTokens: [...left.possibleTokens, ...right.possibleTokens],
+    allTokensKnown: left.allTokensKnown && right.allTokensKnown,
+    canBeFalsy,
+    canBeTruthy,
+    positionedOnEveryBranch: left.positionedOnEveryBranch || right.positionedOnEveryBranch,
+    positionedWhenTruthy,
+    mergePositionEffects: concatenateMergePositionEffects(left.mergePositionEffects, right.mergePositionEffects),
+  }
+}
+
+function andExtracted(left: ExtractedClasses, right: ExtractedClasses): ExtractedClasses {
+  const canBeFalsy = left.canBeFalsy || (left.canBeTruthy && right.canBeFalsy)
+  const canBeTruthy = left.canBeTruthy && right.canBeTruthy
+  return {
+    possibleTokens: left.canBeTruthy ? right.possibleTokens : [],
+    allTokensKnown: !left.canBeTruthy || right.allTokensKnown,
+    canBeFalsy,
+    canBeTruthy,
+    positionedOnEveryBranch: canBeTruthy && !canBeFalsy && right.positionedOnEveryBranch,
+    positionedWhenTruthy: !canBeTruthy || right.positionedWhenTruthy,
+    mergePositionEffects: unionMergePositionEffects(
+      left.canBeFalsy ? ['none'] : [],
+      left.canBeTruthy ? right.mergePositionEffects : [],
+    ),
+  }
+}
+
+function orExtracted(left: ExtractedClasses, right: ExtractedClasses): ExtractedClasses {
+  const canBeFalsy = left.canBeFalsy && right.canBeFalsy
+  const canBeTruthy = left.canBeTruthy || (left.canBeFalsy && right.canBeTruthy)
+  const positionedWhenTruthy = left.positionedWhenTruthy
+    && (!left.canBeFalsy || right.positionedWhenTruthy)
+  return {
+    possibleTokens: [...left.possibleTokens, ...(left.canBeFalsy ? right.possibleTokens : [])],
+    allTokensKnown: left.allTokensKnown && (!left.canBeFalsy || right.allTokensKnown),
+    canBeFalsy,
+    canBeTruthy,
+    positionedOnEveryBranch: canBeTruthy && !canBeFalsy && positionedWhenTruthy,
+    positionedWhenTruthy,
+    mergePositionEffects: unionMergePositionEffects(
+      left.mergePositionEffects,
+      left.canBeFalsy ? right.mergePositionEffects : [],
+    ),
+  }
+}
+
+function unionMergePositionEffects(
+  left: MergePositionEffect[],
+  right: MergePositionEffect[],
+): MergePositionEffect[] {
+  const orderedEffects: MergePositionEffect[] = ['none', 'positioned', 'static']
+  return orderedEffects.filter(effect => left.includes(effect) || right.includes(effect))
+}
+
+function concatenateMergePositionEffects(
+  left: MergePositionEffect[],
+  right: MergePositionEffect[],
+): MergePositionEffect[] {
+  const effects: MergePositionEffect[] = []
+  for (const leftEffect of left) {
+    for (const rightEffect of right) {
+      const effect = rightEffect === 'none' ? leftEffect : rightEffect
+      if (!effects.includes(effect)) effects.push(effect)
+    }
+  }
+  return effects
 }
 
 // String concatenation can split a token across parts: `mt-${size}` builds a class the
@@ -559,7 +811,8 @@ function extractFromPieces(rawPieces: ConcatPiece[]): ExtractedClasses {
   }
 
   const tokens: string[] = []
-  let complete = true
+  let allTokensKnown = true
+  let positionedOnEveryBranch = false
   for (let index = 0; index < pieces.length; index++) {
     const piece = pieces[index]!
     const previous = index > 0 ? pieces[index - 1]! : null
@@ -569,25 +822,46 @@ function extractFromPieces(rawPieces: ConcatPiece[]): ExtractedClasses {
       const fusedRight = next != null && /\S$/.test(piece.text)
       const parts = splitClassTokens(piece.text)
       const kept = parts.slice(fusedLeft ? 1 : 0, fusedRight ? Math.max(parts.length - 1, fusedLeft ? 1 : 0) : parts.length)
-      if (fusedLeft || fusedRight) complete = false
+      if (fusedLeft || fusedRight) allTokensKnown = false
       tokens.push(...kept)
+      if (extractedClassesFromTokens(kept).positionedOnEveryBranch) positionedOnEveryBranch = true
     } else {
-      if (!piece.extracted.complete) complete = false
-      let kept = piece.extracted.tokens
+      if (!piece.extracted.allTokensKnown) allTokensKnown = false
+      let kept = piece.extracted.possibleTokens
       const previousFuses = previous != null && (previous.kind === 'expression' || /\S$/.test(previous.text))
       const nextFuses = next != null && (next.kind === 'expression' || /^\S/.test(next.text))
       if (previousFuses && kept.length > 0) {
         kept = kept.slice(1)
-        complete = false
+        allTokensKnown = false
       }
       if (nextFuses && kept.length > 0) {
         kept = kept.slice(0, -1)
-        complete = false
+        allTokensKnown = false
       }
       tokens.push(...kept)
+      if (!previousFuses && !nextFuses && piece.extracted.positionedOnEveryBranch) positionedOnEveryBranch = true
     }
   }
-  return {tokens, complete}
+  const hasNonEmptyLiteral = pieces.some(piece => piece.kind === 'text' && piece.text !== '')
+  const canBeFalsy = !positionedOnEveryBranch && !hasNonEmptyLiteral
+  const canBeTruthy = positionedOnEveryBranch || pieces.length > 0
+  const mergePositionEffects = positionedOnEveryBranch
+    ? ['positioned'] satisfies MergePositionEffect[]
+    : allTokensKnown
+      ? [lastMergePositionEffect(tokens.flatMap(token => {
+          const classified = classifyToken(token)
+          return classified == null ? [] : [classified]
+        }))]
+      : ['none', 'positioned', 'static'] satisfies MergePositionEffect[]
+  return {
+    possibleTokens: tokens,
+    allTokensKnown,
+    canBeFalsy,
+    canBeTruthy,
+    positionedOnEveryBranch,
+    positionedWhenTruthy: positionedOnEveryBranch,
+    mergePositionEffects,
+  }
 }
 
 // The distribution collects every margin, padding, and gap amount on the element —
@@ -606,7 +880,7 @@ function collectElementValues(
     if (ts.isJsxSpreadAttribute(attribute) || !ts.isIdentifier(attribute.name)) continue
     const name = attribute.name.text
     if (name === 'className' || name === 'class') {
-      for (const token of classAttributeTokens(attribute).tokens) {
+      for (const token of classAttributeTokens(attribute).possibleTokens) {
         const value = classValueToken(token)
         if (value != null) values.push({...location, ...value, source: token})
       }
@@ -649,8 +923,14 @@ function classValueToken(rawToken: string): {axis: SpacingAxis | 'both'; kind: S
 function parseSpacingUtility(utility: string): {axis: SpacingAxis | 'both'; kind: SpacingValueKind; value: string} | null {
   if (hasUtilityRoot(utility, 'gap-x')) return {axis: 'horizontal', kind: 'gap', value: utility.slice(6)}
   if (hasUtilityRoot(utility, 'gap-y')) return {axis: 'vertical', kind: 'gap', value: utility.slice(6)}
-  if (hasUtilityRoot(utility, 'space-x')) return {axis: 'horizontal', kind: 'gap', value: utility.slice(8)}
-  if (hasUtilityRoot(utility, 'space-y')) return {axis: 'vertical', kind: 'gap', value: utility.slice(8)}
+  if (hasUtilityRoot(utility, 'space-x')) {
+    const value = utility.slice(8)
+    return value === 'reverse' ? null : {axis: 'horizontal', kind: 'gap', value}
+  }
+  if (hasUtilityRoot(utility, 'space-y')) {
+    const value = utility.slice(8)
+    return value === 'reverse' ? null : {axis: 'vertical', kind: 'gap', value}
+  }
   const root = utilityRoot(utility)
   if (root == null) return null
   const value = utilityValue(utility)
@@ -687,9 +967,16 @@ function classAmount(value: string, negative: boolean): SpacingAmount {
     if (pxMatch != null) return {form: 'pixels', pixels: sign * Number(pxMatch[1])}
     const remMatch = /^(-?\d+(\.\d+)?)rem$/.exec(content)
     if (remMatch != null) return {form: 'pixels', pixels: sign * Number(remMatch[1]) * 16}
-    return {form: 'keyword', text: content}
+    return {form: 'keyword', text: signedKeyword(content, negative)}
   }
-  return {form: 'keyword', text: value}
+  return {form: 'keyword', text: signedKeyword(value, negative)}
+}
+
+function signedKeyword(value: string, negative: boolean): string {
+  if (!negative) return value
+  if (value.startsWith('-')) return value.slice(1)
+  if (value.startsWith('+')) return `-${value.slice(1)}`
+  return `-${value}`
 }
 
 function inlineValueProperty(name: string): {axis: SpacingAxis | 'both'; kind: SpacingValueKind} | null {
@@ -843,6 +1130,10 @@ function marginUtilityAxis(utility: string): SpacingAxis | 'both' | null {
 function offsetUtilityProperties(utility: string): OffsetProperty[] | null {
   if (hasUtilityRoot(utility, 'inset-y')) return ['top', 'bottom']
   if (hasUtilityRoot(utility, 'inset-x')) return ['left', 'right']
+  if (hasUtilityRoot(utility, 'inset-s')) return ['inlineStart']
+  if (hasUtilityRoot(utility, 'inset-e')) return ['inlineEnd']
+  if (hasUtilityRoot(utility, 'inset-bs')) return ['blockStart']
+  if (hasUtilityRoot(utility, 'inset-be')) return ['blockEnd']
   if (hasUtilityRoot(utility, 'inset')) return ['top', 'bottom', 'left', 'right']
   const root = utilityRoot(utility)
   if (root == null) return null
@@ -851,9 +1142,8 @@ function offsetUtilityProperties(utility: string): OffsetProperty[] | null {
     case 'bottom':
     case 'left':
     case 'right': return [root]
-    // Logical start/end map to left/right; the scan does not model writing modes.
-    case 'start': return ['left']
-    case 'end': return ['right']
+    case 'start': return ['inlineStart']
+    case 'end': return ['inlineEnd']
     default: return null
   }
 }

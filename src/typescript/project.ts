@@ -32,12 +32,7 @@ export function loadTypeScriptProjectGraph(configPath: string): LoadedTypeScript
     const parsed = parseConfig(absoluteConfigPath)
     requireStrictNullChecks(parsed.options, absoluteConfigPath)
     for (const reference of parsed.projectReferences ?? []) load(ts.resolveProjectReferencePath(reference))
-    const program = ts.createProgram({
-      rootNames: parsed.fileNames,
-      options: parsed.options,
-      configFileParsingDiagnostics: parsed.errors,
-      ...(parsed.projectReferences == null ? {} : {projectReferences: parsed.projectReferences}),
-    })
+    const program = createProjectProgram(parsed)
     const project = {
       rootDirectory: dirname(absoluteConfigPath),
       parsed,
@@ -52,12 +47,12 @@ export function loadTypeScriptProjectGraph(configPath: string): LoadedTypeScript
   return loaded
 }
 
-// The spacing scan reads syntax only, so it needs the project's file list without type
-// information: the same tsconfig resolution and reference walk as
-// loadTypeScriptProjectGraph, but no Program is created and no diagnostics are computed.
+// The spacing scan reads syntax only, but project membership includes files reached
+// through imports and triple-slash references, not just the tsconfig's root file names.
+// A Program resolves that complete source set; no checker or diagnostics are requested.
 // The root options carry the entry config's output settings, e.g. `pretty`. A circular
-// project reference simply terminates the walk here; the graph loader is where cycles
-// are rejected, because only type checking depends on reference order.
+// project reference simply terminates the walk here; the checked graph loader is where
+// cycles are rejected, because only type checking depends on reference order.
 export function projectFileNames(configPath: string): {fileNames: string[]; rootOptions: ts.CompilerOptions} {
   const entryConfigPath = resolve(configPath)
   const fileNames = new Set<string>()
@@ -71,7 +66,10 @@ export function projectFileNames(configPath: string): {fileNames: string[]; root
     const parsed = parseConfig(absoluteConfigPath)
     if (absoluteConfigPath === entryConfigPath) rootOptions = parsed.options
     for (const reference of parsed.projectReferences ?? []) load(ts.resolveProjectReferencePath(reference))
-    for (const file of parsed.fileNames) fileNames.add(resolve(file))
+    const program = createProjectProgram(parsed)
+    for (const sourceFile of program.getSourceFiles()) {
+      if (isProjectImplementationSource(sourceFile)) fileNames.add(resolve(sourceFile.fileName))
+    }
   }
 
   load(entryConfigPath)
@@ -82,7 +80,7 @@ export function projectSources(projects: LoadedTypeScriptProject[]): ProjectSour
   const sources = new Map<string, ProjectSource>()
   for (const project of projects) {
     for (const sourceFile of project.program.getSourceFiles()) {
-      if (sourceFile.isDeclarationFile || sourceFile.fileName.includes(`${sep}node_modules${sep}`)) continue
+      if (!isProjectImplementationSource(sourceFile)) continue
       const absoluteFile = resolve(sourceFile.fileName)
       const existing = sources.get(absoluteFile)
       const candidate = {project, sourceFile}
@@ -94,6 +92,19 @@ export function projectSources(projects: LoadedTypeScriptProject[]): ProjectSour
   }
   return [...sources.values()]
     .sort((left, right) => left.sourceFile.fileName.localeCompare(right.sourceFile.fileName))
+}
+
+function createProjectProgram(parsed: ts.ParsedCommandLine): ts.Program {
+  return ts.createProgram({
+    rootNames: parsed.fileNames,
+    options: parsed.options,
+    configFileParsingDiagnostics: parsed.errors,
+    ...(parsed.projectReferences == null ? {} : {projectReferences: parsed.projectReferences}),
+  })
+}
+
+function isProjectImplementationSource(sourceFile: ts.SourceFile): boolean {
+  return !sourceFile.isDeclarationFile && !sourceFile.fileName.includes(`${sep}node_modules${sep}`)
 }
 
 function parseConfig(configPath: string): ts.ParsedCommandLine {

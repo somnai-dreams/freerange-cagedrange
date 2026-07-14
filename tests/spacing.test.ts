@@ -62,6 +62,48 @@ test('a variant-prefixed position class does not satisfy positioning', () => {
   ])
 })
 
+test('every computed className branch must position the element', () => {
+  const noPosition = [{kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null}] satisfies SpacingFindingDetail[]
+  expect(scanElements(`<div className={open ? 'absolute' : ''} style={{top: y}}/>`).details).toEqual(noPosition)
+  expect(scanElements(`<div className={open && 'absolute'} style={{top: y}}/>`).details).toEqual(noPosition)
+  expect(scanElements(`<div className={cn({absolute: open})} style={{top: y}}/>`).details).toEqual(noPosition)
+  expect(scanElements(`<div className={cn({absolute: false})} style={{top: y}}/>`).details).toEqual(noPosition)
+  expect(scanElements(`<div className={open ? 'md:absolute' : 'relative'} style={{top: y}}/>`).details).toEqual(noPosition)
+
+  expect(scanElements(`<div className={open ? 'absolute' : 'relative'} style={{top: y}}/>`).details).toEqual([])
+  expect(scanElements(`<div className={cn(open && 'absolute', 'relative')} style={{top: y}}/>`).details).toEqual([])
+  expect(scanElements(`<div className={cn({absolute: true})} style={{top: y}}/>`).details).toEqual([])
+  expect(scanElements(`<div className={(open && 'absolute') || 'relative'} style={{top: y}}/>`).details).toEqual([])
+  expect(scanElements(`<div className={(open ? 'absolute' : '') || 'relative'} style={{top: y}}/>`).details).toEqual([])
+})
+
+test('twMerge positioning follows the last possible position utility', () => {
+  expect(scanElements(`<div className={twMerge('absolute', open && 'static')} style={{top: y}}/>`).details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: 'static'},
+  ])
+  expect(scanElements(`<div className={twMerge('static', 'absolute')} style={{top: y}}/>`).details).toEqual([])
+  expect(scanElements(`<div className={twMerge('absolute', 'mt-2')} style={{top: y}}/>`).details).toEqual([
+    {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'mt-2'},
+  ])
+})
+
+test('a shadowable undefined identifier stays unknown', () => {
+  expect(scanElements(`<div className={undefined || 'absolute'} style={{top: y}}/>`).details).toEqual([
+    {kind: 'unscannable', cause: 'partialClassName'},
+  ])
+  expect(scanElements(`<div className={(void 0) || 'absolute'} style={{top: y}}/>`).details).toEqual([])
+})
+
+test('nullish coalescing follows reachable conditional branches', () => {
+  expect(scanElements(`<div className={(open ? null : 'absolute') ?? 'relative'} style={{top: y}}/>`).details).toEqual([])
+  expect(scanElements(`<div className={(open ? '' : 'absolute') ?? 'relative'} style={{top: y}}/>`).details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
+  ])
+  expect(scanElements(`<div className={maybeClass ?? 'absolute'} style={{top: y}}/>`).details).toEqual([
+    {kind: 'unscannable', cause: 'partialClassName'},
+  ])
+})
+
 test('a margin class on the owned axis is a finding, and the other axis passes', () => {
   expect(scanElements('<div className="absolute mt-4" style={{top: y}}/>').details).toEqual([
     {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'mt-4'},
@@ -108,6 +150,22 @@ test('inset classes match by the properties they contain', () => {
   expect(scanElements('<div className="absolute inset-0" style={{top: y}}/>').details).toEqual([
     {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'inset-0'},
   ])
+})
+
+test('logical inset classes match only the corresponding logical edge', () => {
+  expect(scanElements('<div className="absolute inset-s-0" style={{top: y, insetInlineStart: x}}/>').details).toEqual([
+    {kind: 'offsetClassOnOwnedProperty', property: 'inlineStart', styleProperty: 'insetInlineStart', className: 'inset-s-0'},
+  ])
+  expect(scanElements('<div className="absolute inset-e-0" style={{top: y, insetInlineEnd: x}}/>').details).toEqual([
+    {kind: 'offsetClassOnOwnedProperty', property: 'inlineEnd', styleProperty: 'insetInlineEnd', className: 'inset-e-0'},
+  ])
+  expect(scanElements('<div className="absolute inset-bs-0" style={{left: x, insetBlockStart: y}}/>').details).toEqual([
+    {kind: 'offsetClassOnOwnedProperty', property: 'blockStart', styleProperty: 'insetBlockStart', className: 'inset-bs-0'},
+  ])
+  expect(scanElements('<div className="absolute inset-be-0" style={{left: x, insetBlockEnd: y}}/>').details).toEqual([
+    {kind: 'offsetClassOnOwnedProperty', property: 'blockEnd', styleProperty: 'insetBlockEnd', className: 'inset-be-0'},
+  ])
+  expect(scanElements('<div dir="rtl" className="absolute inset-s-0" style={{left: x}}/>').details).toEqual([])
 })
 
 // From MJ Gallery: `before:` and `[&>*]:` variants style a pseudo-element or other
@@ -212,6 +270,9 @@ test('extracted class tokens feed the distribution', () => {
   expect(scanValues(`<div className={cn('px-3', extra)}/>`)).toEqual([
     {axis: 'horizontal', kind: 'padding', amount: {form: 'pixels', pixels: 12}, source: 'px-3'},
   ])
+  expect(scanValues(`<div className={cn({'mt-2': false, 'px-3': true})}/>`)).toEqual([
+    {axis: 'horizontal', kind: 'padding', amount: {form: 'pixels', pixels: 12}, source: 'px-3'},
+  ])
 })
 
 test('a computed position value makes positioning unscannable', () => {
@@ -293,6 +354,13 @@ test('class utilities contribute their amounts on the Tailwind scale', () => {
   ])
 })
 
+test('space-axis reverse modifiers do not declare spacing amounts', () => {
+  expect(scanValues('<div className="space-x-4 rtl:space-x-reverse space-y-2 space-y-reverse"/>')).toEqual([
+    {axis: 'horizontal', kind: 'gap', amount: {form: 'pixels', pixels: 16}, source: 'space-x-4'},
+    {axis: 'vertical', kind: 'gap', amount: {form: 'pixels', pixels: 8}, source: 'space-y-2'},
+  ])
+})
+
 test('arbitrary values parse in px and rem; the rest stay as written', () => {
   expect(scanValues('<div className="mb-[13px]"/>')).toEqual([
     {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 13}, source: 'mb-[13px]'},
@@ -303,6 +371,33 @@ test('arbitrary values parse in px and rem; the rest stay as written', () => {
   expect(scanValues('<div className="gap-[10%]"/>')).toEqual([
     {axis: 'both', kind: 'gap', amount: {form: 'keyword', text: '10%'}, source: 'gap-[10%]'},
   ])
+  expect(scanValues('<div className="mt-[10%] -mt-[10%] mt-[var(--gutter)] -mt-[var(--gutter)]"/>')).toEqual([
+    {axis: 'vertical', kind: 'margin', amount: {form: 'keyword', text: '10%'}, source: 'mt-[10%]'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'keyword', text: '-10%'}, source: '-mt-[10%]'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'keyword', text: 'var(--gutter)'}, source: 'mt-[var(--gutter)]'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'keyword', text: '-var(--gutter)'}, source: '-mt-[var(--gutter)]'},
+  ])
+  expect(scanValues('<div className="-mt-[-10%] -mt-[+10%]"/>')).toEqual([
+    {axis: 'vertical', kind: 'margin', amount: {form: 'keyword', text: '10%'}, source: '-mt-[-10%]'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'keyword', text: '-10%'}, source: '-mt-[+10%]'},
+  ])
+})
+
+test('the distribution keeps repeated positive and negative keyword amounts separate', () => {
+  const source = [
+    'export function Fixture() {',
+    '  return <main>',
+    '    <div className="mt-[10%]"/>',
+    '    <div className="mt-[10%]"/>',
+    '    <div className="-mt-[10%]"/>',
+    '    <div className="-mt-[10%]"/>',
+    '  </main>',
+    '}',
+  ].join('\n')
+  const report = formatSpacingReport([{file: 'fixture.tsx', scan: scanSpacingSource('fixture.tsx', source)}], false)
+  expect(report).toContain(`'-10%' ×2`)
+  expect(report).toContain(`'10%' ×2`)
+  expect(report).not.toContain(`'10%' ×4`)
 })
 
 test('variant-prefixed amounts are part of the vocabulary; auto margins are not amounts', () => {
@@ -385,6 +480,10 @@ function writeSpacingProject(directory: string, files: Record<string, string>): 
     compilerOptions: {strict: true, target: 'ESNext', module: 'ESNext', jsx: 'react-jsx'},
     include: ['**/*.ts', '**/*.tsx'],
   }))
+  writeProjectFiles(directory, files)
+}
+
+function writeProjectFiles(directory: string, files: Record<string, string>): void {
   for (const [file, source] of Object.entries(files)) {
     const path = join(directory, file)
     mkdirSync(dirname(path), {recursive: true})
@@ -430,6 +529,50 @@ test('fr --spacing <file> narrows the output to that file', () => {
     const outside = runCli(directory, '--spacing', join('..', 'elsewhere.tsx'))
     expect(outside.exitCode).toBe(1)
     expect(outside.stderr).toContain('File not found')
+  } finally {
+    rmSync(directory, {recursive: true, force: true})
+  }
+})
+
+test('fr --spacing follows imports without type-checking and excludes non-project implementations', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'freerange-spacing-'))
+  try {
+    writeFileSync(join(directory, 'tsconfig.json'), JSON.stringify({
+      compilerOptions: {
+        strict: false,
+        target: 'ESNext',
+        module: 'ESNext',
+        moduleResolution: 'Bundler',
+        jsx: 'preserve',
+      },
+      files: ['entry.ts'],
+    }))
+    writeProjectFiles(directory, {
+      'entry.ts': `import './feature'\n`,
+      'feature.ts': `import './overlay'\nimport './types.d.ts'\nimport './node_modules/dependency'\n`,
+      'overlay.tsx': `const typeError: number = 'still scans'\n${overlayComponent}\n`,
+      'types.d.ts': 'declare const importedType: number\n',
+      'node_modules/dependency.tsx': 'export const dependency = <div className="mt-96"/>\n',
+      'unused.tsx': 'export const unused = <div className="mt-80"/>\n',
+    })
+
+    const project = runCli(directory, '--spacing')
+    expect(project.exitCode).toBe(0)
+    expect(project.stdout).toContain('overlay.tsx(3,10): warning [spacing-no-position]:')
+    expect(project.stdout).toContain('across 3 scanned files')
+    expect(project.stdout).not.toContain('mt-96')
+    expect(project.stdout).not.toContain('mt-80')
+
+    const targeted = runCli(directory, '--spacing', 'overlay.tsx')
+    expect(targeted.exitCode).toBe(0)
+    expect(targeted.stdout).toContain('overlay.tsx(3,10): warning [spacing-no-position]:')
+    expect(targeted.stdout).toContain('across 1 scanned file')
+
+    for (const excluded of ['unused.tsx', 'types.d.ts', join('node_modules', 'dependency.tsx')]) {
+      const result = runCli(directory, '--spacing', excluded)
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('File is not part of the project')
+    }
   } finally {
     rmSync(directory, {recursive: true, force: true})
   }
