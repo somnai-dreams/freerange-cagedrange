@@ -5,7 +5,7 @@
 // version narrowed to that file: same configuration, same content kinds, same line
 // formats, one file's slice.
 
-import {existsSync, realpathSync} from 'node:fs'
+import {existsSync} from 'node:fs'
 import {relative, resolve} from 'node:path'
 import * as ts from 'typescript'
 import {analyzeCheckedSource, type DetailedAnalysis} from './analyze.ts'
@@ -14,16 +14,23 @@ import type {AssertionVerdict, FunctionAnalysis, RequirementFailure} from './eng
 import type {SiteID} from './ir/ids.ts'
 import {reportPath, siteLocation} from './ir/program.ts'
 import {formatUnsupportedReason} from './report/index.ts'
-import {formatSpacingReport, scanSpacingSource, type SpacingPathScan} from './spacing.ts'
+import {auditSpacingFile, auditSpacingSource} from './spacing/audit.ts'
+import type {SpacingFileAudit, SpacingReportOptions} from './spacing/model.ts'
+import {formatSpacingReport} from './spacing/report.ts'
 import {checkFile} from './typescript/check.ts'
 import {formatDiagnosticLocation, formatDiagnosticPrefix, formatTypeScriptDiagnostics, TypeScriptDiagnosticsError, usePrettyOutput} from './typescript/diagnostics.ts'
 import {
   findTypeScriptConfig,
-  loadTypeScriptProjectGraph,
-  projectFileNames,
-  projectSources,
+  findProjectSource,
+  loadCheckedTypeScriptProjectGraph,
+  loadSyntaxTypeScriptProjectGraph,
   type ProjectSource,
 } from './typescript/project.ts'
+
+const spacingNormalization: SpacingReportOptions['normalization'] = {
+  tailwindStepRem: 0.25,
+  rootFontSizePx: 16,
+}
 
 type SimpleLintFinding = {
   kind: 'simple'
@@ -115,9 +122,9 @@ export function runProjectSpacing(searchFrom: string): boolean {
   if (configPath == null) {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
   }
-  const {fileNames, rootOptions} = projectFileNames(configPath)
-  const scans = fileNames.map(scanSpacingPath)
-  console.log(formatSpacingReport(scans, usePrettyOutput(rootOptions['pretty'])))
+  const graph = loadSyntaxTypeScriptProjectGraph(configPath)
+  const audits = graph.sources.map(source => auditProjectSpacingSource(source.sourceFile))
+  console.log(formatSpacingReport(audits, spacingReportOptions(graph.entry.parsed.options['pretty'])))
   return false
 }
 
@@ -129,23 +136,41 @@ export function runFileSpacing(file: string): boolean {
   if (!existsSync(absoluteFile)) throw new Error(`File not found: ${absoluteFile}`)
   const configPath = findTypeScriptConfig(process.cwd())
   if (configPath == null) {
-    console.log(formatSpacingReport([scanSpacingPath(absoluteFile)], usePrettyOutput(undefined)))
+    console.log(formatSpacingReport([auditStandaloneSpacingFile(absoluteFile)], spacingReportOptions(undefined)))
     return false
   }
-  const {fileNames, rootOptions} = projectFileNames(configPath)
-  const targetPath = canonicalFilePath(absoluteFile)
-  if (!fileNames.some(candidate => canonicalFilePath(candidate) === targetPath)) {
+  const graph = loadSyntaxTypeScriptProjectGraph(configPath)
+  const source = findProjectSource(graph, absoluteFile)
+  if (source == null) {
     throw new Error(`File is not part of the project resolved from ${configPath}: ${absoluteFile}`)
   }
-  console.log(formatSpacingReport([scanSpacingPath(absoluteFile)], usePrettyOutput(rootOptions['pretty'])))
+  console.log(formatSpacingReport(
+    [auditProjectSpacingSource(source.sourceFile)],
+    spacingReportOptions(graph.entry.parsed.options['pretty']),
+  ))
   return false
 }
 
-// Finding lines name files relative to the working directory, matching reportPath.
-function scanSpacingPath(file: string): SpacingPathScan {
+function auditStandaloneSpacingFile(file: string): SpacingFileAudit {
   const source = ts.sys.readFile(file)
   if (source == null) throw new Error(`Could not read ${file}`)
-  return {file: relative(process.cwd(), file), scan: scanSpacingSource(file, source)}
+  return {...auditSpacingSource(file, source), file: spacingReportPath(file)}
+}
+
+// Finding lines name files relative to the working directory, matching reportPath. The
+// exact SourceFile already loaded by the project Program is passed through unchanged.
+function auditProjectSpacingSource(sourceFile: ts.SourceFile): SpacingFileAudit {
+  return {...auditSpacingFile(sourceFile), file: spacingReportPath(sourceFile.fileName)}
+}
+
+function spacingReportPath(file: string): string {
+  const base = ts.sys.realpath?.(process.cwd()) ?? process.cwd()
+  const target = ts.sys.realpath?.(file) ?? file
+  return relative(base, target)
+}
+
+function spacingReportOptions(configuredPretty?: unknown): SpacingReportOptions {
+  return {pretty: usePrettyOutput(configuredPretty), normalization: spacingNormalization}
 }
 
 function analyzeProject(searchFrom: string): ProjectScan {
@@ -153,9 +178,9 @@ function analyzeProject(searchFrom: string): ProjectScan {
   if (configPath == null) {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
   }
-  const projects = loadTypeScriptProjectGraph(configPath)
-  const rootProject = projects.at(-1)!
-  const sources = projectSources(projects)
+  const graph = loadCheckedTypeScriptProjectGraph(configPath)
+  const rootProject = graph.entry
+  const {projects, sources} = graph
   const diagnostics = uniqueDiagnostics(projects.flatMap(project => ts.getPreEmitDiagnostics(project.program)))
   requireNoTypeScriptErrors(diagnostics, rootProject.parsed.options)
 
@@ -469,11 +494,9 @@ function analyzeTargetFile(file: string): TargetFile {
   const configPath = findTypeScriptConfig(process.cwd())
   if (configPath == null) return analyzeFileAlone(absoluteFile)
 
-  const projects = loadTypeScriptProjectGraph(configPath)
-  const rootProject = projects.at(-1)!
-  const targetPath = canonicalFilePath(absoluteFile)
-  const source = projectSources(projects).find(candidate =>
-    canonicalFilePath(candidate.sourceFile.fileName) === targetPath)
+  const graph = loadCheckedTypeScriptProjectGraph(configPath)
+  const rootProject = graph.entry
+  const source = findProjectSource(graph, absoluteFile)
   if (source == null) {
     throw new Error(`File is not part of the project resolved from ${configPath}: ${absoluteFile}`)
   }
@@ -483,11 +506,6 @@ function analyzeTargetFile(file: string): TargetFile {
     detailed: analyzeProjectSource(source, process.cwd()),
     pretty: usePrettyOutput(rootProject.parsed.options['pretty']),
   }
-}
-
-function canonicalFilePath(file: string): string {
-  const real = realpathSync.native(file)
-  return ts.sys.useCaseSensitiveFileNames ? real : real.toLowerCase()
 }
 
 // A single-file program when no tsconfig resolves from the current directory.

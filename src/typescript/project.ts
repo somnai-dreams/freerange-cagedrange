@@ -1,8 +1,9 @@
-import {dirname, isAbsolute, relative, resolve, sep} from 'node:path'
+import {dirname, extname, isAbsolute, relative, resolve, sep} from 'node:path'
 import * as ts from 'typescript'
 import {TypeScriptDiagnosticsError} from './diagnostics.ts'
 
 export type LoadedTypeScriptProject = {
+  configPath: string
   rootDirectory: string
   parsed: ts.ParsedCommandLine
   program: ts.Program
@@ -13,80 +14,79 @@ export type ProjectSource = {
   sourceFile: ts.SourceFile
 }
 
+export type TypeScriptProjectGraph = {
+  entry: LoadedTypeScriptProject
+  projects: LoadedTypeScriptProject[]
+  sources: ProjectSource[]
+}
+
 export function findTypeScriptConfig(searchFrom: string): string | null {
   return ts.findConfigFile(resolve(searchFrom), file => ts.sys.fileExists(file), 'tsconfig.json') ?? null
 }
 
-export function loadTypeScriptProjectGraph(configPath: string): LoadedTypeScriptProject[] {
-  const loaded: LoadedTypeScriptProject[] = []
-  const byConfigPath = new Map<string, LoadedTypeScriptProject | null>()
+export function loadCheckedTypeScriptProjectGraph(configPath: string): TypeScriptProjectGraph {
+  return loadProjectGraph(configPath, true)
+}
+
+// Syntax consumers use the same Programs and SourceFiles as project discovery. They do
+// not request a checker or diagnostics, and unlike the checked analyzer they accept a
+// project without strict null checks.
+export function loadSyntaxTypeScriptProjectGraph(configPath: string): TypeScriptProjectGraph {
+  return loadProjectGraph(configPath, false)
+}
+
+export function findProjectSource(graph: TypeScriptProjectGraph, file: string): ProjectSource | null {
+  const target = canonicalPathKey(file)
+  return graph.sources.find(source => canonicalPathKey(source.sourceFile.fileName) === target) ?? null
+}
+
+function loadProjectGraph(configPath: string, requireStrict: boolean): TypeScriptProjectGraph {
+  const projects: LoadedTypeScriptProject[] = []
+  const loadedByConfig = new Map<string, LoadedTypeScriptProject>()
+  const loading = new Set<string>()
 
   const load = (requestedConfigPath: string): LoadedTypeScriptProject => {
-    const absoluteConfigPath = resolve(requestedConfigPath)
-    const existing = byConfigPath.get(absoluteConfigPath)
-    if (existing === null) {
+    const absoluteConfigPath = realPath(requestedConfigPath)
+    const configKey = canonicalPathKey(absoluteConfigPath)
+    const existing = loadedByConfig.get(configKey)
+    if (existing != null) return existing
+    if (loading.has(configKey)) {
       throw new Error(`Circular TypeScript project reference involving ${absoluteConfigPath}`)
     }
-    if (existing !== undefined) return existing
-    byConfigPath.set(absoluteConfigPath, null)
+    loading.add(configKey)
     const parsed = parseConfig(absoluteConfigPath)
-    requireStrictNullChecks(parsed.options, absoluteConfigPath)
-    for (const reference of parsed.projectReferences ?? []) load(ts.resolveProjectReferencePath(reference))
-    const program = createProjectProgram(parsed)
-    const project = {
+    if (requireStrict) requireStrictNullChecks(parsed.options, absoluteConfigPath)
+    for (const reference of parsed.projectReferences ?? []) {
+      load(ts.resolveProjectReferencePath(reference))
+    }
+    const project: LoadedTypeScriptProject = {
+      configPath: absoluteConfigPath,
       rootDirectory: dirname(absoluteConfigPath),
       parsed,
-      program,
+      program: createProjectProgram(parsed),
     }
-    byConfigPath.set(absoluteConfigPath, project)
-    loaded.push(project)
+    loading.delete(configKey)
+    loadedByConfig.set(configKey, project)
+    projects.push(project)
     return project
   }
 
-  load(configPath)
-  return loaded
+  const entry = load(configPath)
+  return {entry, projects, sources: collectProjectSources(projects)}
 }
 
-// The spacing scan reads syntax only, but project membership includes files reached
-// through imports and triple-slash references, not just the tsconfig's root file names.
-// A Program resolves that complete source set; no checker or diagnostics are requested.
-// The root options carry the entry config's output settings, e.g. `pretty`. A circular
-// project reference simply terminates the walk here; the checked graph loader is where
-// cycles are rejected, because only type checking depends on reference order.
-export function projectFileNames(configPath: string): {fileNames: string[]; rootOptions: ts.CompilerOptions} {
-  const entryConfigPath = resolve(configPath)
-  const fileNames = new Set<string>()
-  const visited = new Set<string>()
-  let rootOptions: ts.CompilerOptions = {}
-
-  const load = (requestedConfigPath: string): void => {
-    const absoluteConfigPath = resolve(requestedConfigPath)
-    if (visited.has(absoluteConfigPath)) return
-    visited.add(absoluteConfigPath)
-    const parsed = parseConfig(absoluteConfigPath)
-    if (absoluteConfigPath === entryConfigPath) rootOptions = parsed.options
-    for (const reference of parsed.projectReferences ?? []) load(ts.resolveProjectReferencePath(reference))
-    const program = createProjectProgram(parsed)
-    for (const sourceFile of program.getSourceFiles()) {
-      if (isProjectImplementationSource(sourceFile)) fileNames.add(resolve(sourceFile.fileName))
-    }
-  }
-
-  load(entryConfigPath)
-  return {fileNames: [...fileNames].sort(), rootOptions}
-}
-
-export function projectSources(projects: LoadedTypeScriptProject[]): ProjectSource[] {
+function collectProjectSources(projects: LoadedTypeScriptProject[]): ProjectSource[] {
   const sources = new Map<string, ProjectSource>()
   for (const project of projects) {
     for (const sourceFile of project.program.getSourceFiles()) {
       if (!isProjectImplementationSource(sourceFile)) continue
-      const absoluteFile = resolve(sourceFile.fileName)
-      const existing = sources.get(absoluteFile)
+      const absoluteFile = realPath(sourceFile.fileName)
+      const fileKey = canonicalPathKey(absoluteFile)
+      const existing = sources.get(fileKey)
       const candidate = {project, sourceFile}
       if (existing == null
         || ownershipScore(project, absoluteFile) > ownershipScore(existing.project, absoluteFile)) {
-        sources.set(absoluteFile, candidate)
+        sources.set(fileKey, candidate)
       }
     }
   }
@@ -104,7 +104,18 @@ function createProjectProgram(parsed: ts.ParsedCommandLine): ts.Program {
 }
 
 function isProjectImplementationSource(sourceFile: ts.SourceFile): boolean {
-  return !sourceFile.isDeclarationFile && !sourceFile.fileName.includes(`${sep}node_modules${sep}`)
+  if (sourceFile.isDeclarationFile || sourceFile.fileName.includes(`${sep}node_modules${sep}`)) return false
+  switch (extname(sourceFile.fileName).toLowerCase()) {
+    case '.js':
+    case '.jsx':
+    case '.ts':
+    case '.tsx':
+    case '.mjs':
+    case '.mts':
+    case '.cjs':
+    case '.cts': return true
+    default: return false
+  }
 }
 
 function parseConfig(configPath: string): ts.ParsedCommandLine {
@@ -135,4 +146,14 @@ function ownershipScore(project: LoadedTypeScriptProject, file: string): number 
   const path = relative(project.rootDirectory, file)
   const inside = path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`))
   return inside ? project.rootDirectory.length : -1
+}
+
+function realPath(path: string): string {
+  const absolute = resolve(path)
+  return ts.sys.realpath?.(absolute) ?? absolute
+}
+
+function canonicalPathKey(path: string): string {
+  const real = realPath(path)
+  return ts.sys.useCaseSensitiveFileNames ? real : real.toLowerCase()
 }

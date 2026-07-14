@@ -3,16 +3,35 @@ import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {formatSpacingReport, scanSpacingSource, type SpacingFindingDetail, type SpacingValueSite} from '../src/index.ts'
+import {
+  auditSpacingSource,
+  formatSpacingReport,
+  type SpacingElementCoverage,
+  type SpacingOwnershipFinding,
+  type SpacingReportOptions,
+  type SpacingValue,
+} from '../src/index.ts'
+
+const reportOptions: SpacingReportOptions = {
+  pretty: false,
+  normalization: {tailwindStepRem: 0.25, rootFontSizePx: 16},
+}
 
 // Each scan wraps the element in a component so the fixture is a complete TSX file; the
 // scan itself never needs the surrounding code to type-check.
-function scanElements(elements: string): {inlineSpacedElements: number; details: SpacingFindingDetail[]} {
+function scanElements(elements: string): {
+  inlineSpacedElements: number
+  details: SpacingOwnershipFinding[]
+  limitedCoverage: SpacingElementCoverage[]
+} {
   const source = `export function Fixture(y: number, x: number) {\n  return <main>${elements}</main>\n}\n`
-  const scan = scanSpacingSource('fixture.tsx', source)
+  const audit = auditSpacingSource('fixture.tsx', source)
   return {
-    inlineSpacedElements: scan.inlineSpacedElements,
-    details: scan.findings.map(finding => finding.detail),
+    inlineSpacedElements: audit.elements.filter(element => element.hasVisibleInlineOwnership).length,
+    details: audit.elements.flatMap(element => element.ownership),
+    limitedCoverage: audit.elements
+      .map(element => element.coverage)
+      .filter(coverage => coverage.kind !== 'complete'),
   }
 }
 
@@ -63,7 +82,7 @@ test('a variant-prefixed position class does not satisfy positioning', () => {
 })
 
 test('every computed className branch must position the element', () => {
-  const noPosition = [{kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null}] satisfies SpacingFindingDetail[]
+  const noPosition = [{kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null}] satisfies SpacingOwnershipFinding[]
   expect(scanElements(`<div className={open ? 'absolute' : ''} style={{top: y}}/>`).details).toEqual(noPosition)
   expect(scanElements(`<div className={open && 'absolute'} style={{top: y}}/>`).details).toEqual(noPosition)
   expect(scanElements(`<div className={cn({absolute: open})} style={{top: y}}/>`).details).toEqual(noPosition)
@@ -88,8 +107,10 @@ test('twMerge positioning follows the last possible position utility', () => {
 })
 
 test('a shadowable undefined identifier stays unknown', () => {
-  expect(scanElements(`<div className={undefined || 'absolute'} style={{top: y}}/>`).details).toEqual([
-    {kind: 'unscannable', cause: 'partialClassName'},
+  const unknown = scanElements(`<div className={undefined || 'absolute'} style={{top: y}}/>`)
+  expect(unknown.details).toEqual([])
+  expect(unknown.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'partialClassName'}]},
   ])
   expect(scanElements(`<div className={(void 0) || 'absolute'} style={{top: y}}/>`).details).toEqual([])
 })
@@ -99,8 +120,10 @@ test('nullish coalescing follows reachable conditional branches', () => {
   expect(scanElements(`<div className={(open ? '' : 'absolute') ?? 'relative'} style={{top: y}}/>`).details).toEqual([
     {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
   ])
-  expect(scanElements(`<div className={maybeClass ?? 'absolute'} style={{top: y}}/>`).details).toEqual([
-    {kind: 'unscannable', cause: 'partialClassName'},
+  const unknown = scanElements(`<div className={maybeClass ?? 'absolute'} style={{top: y}}/>`)
+  expect(unknown.details).toEqual([])
+  expect(unknown.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'partialClassName'}]},
   ])
 })
 
@@ -204,26 +227,50 @@ test('an inline margin owns its axis without needing positioning', () => {
 
 test('a shorthand style property claims its axis', () => {
   const source = 'export function Fixture() {\n  const top = 4\n  return <div style={{top}}/>\n}\n'
-  expect(scanSpacingSource('fixture.tsx', source).findings.map(finding => finding.detail)).toEqual([
+  expect(auditSpacingSource('fixture.tsx', source).elements.flatMap(element => element.ownership)).toEqual([
     {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
   ])
 })
 
-test('a props spread makes the element unscannable and blocks the other checks', () => {
-  expect(scanElements('<div {...({} as object)} className="mt-4" style={{top: y}}/>').details).toEqual([
-    {kind: 'unscannable', cause: 'spreadAttributes'},
+test('a props spread limits coverage while visible conflicts remain findings', () => {
+  const result = scanElements('<div className="mt-4" style={{top: y}} {...({} as object)}/>')
+  expect(result.details).toEqual([
+    {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'mt-4'},
+  ])
+  expect(result.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'spreadAttributes'}]},
   ])
 })
 
-test('a spread inside the style object makes the element unscannable', () => {
-  expect(scanElements('<div style={{...({} as object), top: y}}/>').details).toEqual([
-    {kind: 'unscannable', cause: 'opaqueStyleMember'},
+test('a spread inside the style object limits coverage and suppresses absence-based findings', () => {
+  const result = scanElements('<div style={{...({} as object), top: y}}/>')
+  expect(result.details).toEqual([])
+  expect(result.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'opaqueStyleMember'}]},
   ])
 })
 
-test('a fully computed className makes the element unscannable', () => {
-  expect(scanElements('<div className={dynamicClasses} style={{top: y}}/>').details).toEqual([
-    {kind: 'unscannable', cause: 'computedClassName'},
+test('a later explicit position restores certainty after a style spread', () => {
+  const restored = scanElements(`<div style={{...styles, position: 'static', top: y}}/>`)
+  expect(restored.details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
+  ])
+  expect(restored.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'opaqueStyleMember'}]},
+  ])
+
+  const invalidated = scanElements(`<div style={{position: 'static', ...styles, top: y}}/>`)
+  expect(invalidated.details).toEqual([])
+  expect(invalidated.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'opaqueStyleMember'}]},
+  ])
+})
+
+test('a fully computed className limits coverage instead of becoming a finding', () => {
+  const result = scanElements('<div className={dynamicClasses} style={{top: y}}/>')
+  expect(result.details).toEqual([])
+  expect(result.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'computedClassName'}]},
   ])
 })
 
@@ -231,15 +278,17 @@ test('a fully computed className makes the element unscannable', () => {
 // statically visible classes are checked even when the full list is not knowable. The
 // partial note prints after the findings; proving the element unpositioned is the one
 // check that stands down, since an unseen class may add `absolute`.
-test('classes visible inside cn(...) are checked; the unseen rest gets a note', () => {
-  expect(scanElements(`<div className={cn('absolute mt-2', extra)} style={{top: y}}/>`).details).toEqual([
+test('classes visible inside cn(...) are checked while the unseen rest limits coverage', () => {
+  const first = scanElements(`<div className={cn('absolute mt-2', extra)} style={{top: y}}/>`)
+  expect(first.details).toEqual([
     {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'mt-2'},
-    {kind: 'unscannable', cause: 'partialClassName'},
   ])
-  expect(scanElements(`<div className={CN('inset-0', props.className)} style={{top: y}}/>`).details).toEqual([
+  expect(first.limitedCoverage).toEqual([{kind: 'partial', reasons: [{kind: 'partialClassName'}]}])
+  const second = scanElements(`<div className={CN('inset-0', props.className)} style={{top: y}}/>`)
+  expect(second.details).toEqual([
     {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'inset-0'},
-    {kind: 'unscannable', cause: 'partialClassName'},
   ])
+  expect(second.limitedCoverage).toEqual([{kind: 'partial', reasons: [{kind: 'partialClassName'}]}])
 })
 
 test('conditional classes count like variant-prefixed ones, and full branches stay complete', () => {
@@ -256,30 +305,30 @@ test('conditional classes count like variant-prefixed ones, and full branches st
 })
 
 test('template classes are read; fused fragments are dropped, never guessed', () => {
-  expect(scanElements('<div className={`absolute ${extra}`} style={{top: y}}/>').details).toEqual([
-    {kind: 'unscannable', cause: 'partialClassName'},
-  ])
+  const separated = scanElements('<div className={`absolute ${extra}`} style={{top: y}}/>')
+  expect(separated.details).toEqual([])
+  expect(separated.limitedCoverage).toEqual([{kind: 'partial', reasons: [{kind: 'partialClassName'}]}])
   // `mt-${size}` builds a class the scan cannot name: no mt- token is invented, and
-  // with nothing visible the element falls back to the fully computed note.
-  expect(scanElements('<div className={`mt-${size}`} style={{marginTop: y}}/>').details).toEqual([
-    {kind: 'unscannable', cause: 'computedClassName'},
-  ])
+  // with nothing visible the element records computed class coverage.
+  const fused = scanElements('<div className={`mt-${size}`} style={{marginTop: y}}/>')
+  expect(fused.details).toEqual([])
+  expect(fused.limitedCoverage).toEqual([{kind: 'partial', reasons: [{kind: 'computedClassName'}]}])
 })
 
 test('extracted class tokens feed the distribution', () => {
   expect(scanValues(`<div className={cn('px-3', extra)}/>`)).toEqual([
-    {axis: 'horizontal', kind: 'padding', amount: {form: 'pixels', pixels: 12}, source: 'px-3'},
+    {axis: 'horizontal', kind: 'padding', amount: {form: 'tailwindScale', steps: 3}, source: 'px-3'},
   ])
   expect(scanValues(`<div className={cn({'mt-2': false, 'px-3': true})}/>`)).toEqual([
-    {axis: 'horizontal', kind: 'padding', amount: {form: 'pixels', pixels: 12}, source: 'px-3'},
+    {axis: 'horizontal', kind: 'padding', amount: {form: 'tailwindScale', steps: 3}, source: 'px-3'},
   ])
 })
 
-test('a computed position value makes positioning unscannable', () => {
+test('a computed position value limits coverage and suppresses the no-position finding', () => {
   const source = `export function Fixture(mode: string, y: number) {\n  return <div style={{position: mode, top: y}}/>\n}\n`
-  expect(scanSpacingSource('fixture.tsx', source).findings.map(finding => finding.detail)).toEqual([
-    {kind: 'unscannable', cause: 'computedPosition'},
-  ])
+  const element = auditSpacingSource('fixture.tsx', source).elements[0]!
+  expect(element.ownership).toEqual([])
+  expect(element.coverage).toEqual({kind: 'partial', reasons: [{kind: 'computedPosition'}]})
 })
 
 test('a literal className expression is still readable', () => {
@@ -321,52 +370,51 @@ test('findings carry the element position and sort by document order', () => {
     '  </main>',
     '}',
   ].join('\n')
-  const scan = scanSpacingSource('fixture.tsx', source)
-  expect(scan.inlineSpacedElements).toBe(2)
-  expect(scan.findings.map(finding => [finding.line, finding.detail.kind])).toEqual([
+  const audit = auditSpacingSource('fixture.tsx', source)
+  expect(audit.elements.filter(element => element.hasVisibleInlineOwnership)).toHaveLength(2)
+  expect(audit.elements.flatMap(element => element.ownership.map(finding => [element.line, finding.kind]))).toEqual([
     [3, 'offsetWithoutPosition'],
     [4, 'offsetWithoutPosition'],
   ])
 })
 
-function scanValues(elements: string): Array<Pick<SpacingValueSite, 'axis' | 'kind' | 'amount' | 'source'>> {
+function scanValues(elements: string): SpacingValue[] {
   const source = `export function Fixture(y: number) {\n  return <main>${elements}</main>\n}\n`
-  return scanSpacingSource('fixture.tsx', source).values.map(({axis, kind, amount, source: written}) =>
-    ({axis, kind, amount, source: written}))
+  return auditSpacingSource('fixture.tsx', source).elements.flatMap(element => element.values)
 }
 
 test('class utilities contribute their amounts on the Tailwind scale', () => {
   expect(scanValues('<div className="mt-2.5"/>')).toEqual([
-    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 10}, source: 'mt-2.5'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'tailwindScale', steps: 2.5}, source: 'mt-2.5'},
   ])
   expect(scanValues('<div className="-mt-2"/>')).toEqual([
-    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: -8}, source: '-mt-2'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'tailwindScale', steps: -2}, source: '-mt-2'},
   ])
   expect(scanValues('<div className="mb-px"/>')).toEqual([
-    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 1}, source: 'mb-px'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'length', value: 1, unit: 'px'}, source: 'mb-px'},
   ])
   expect(scanValues('<div className="p-4"/>')).toEqual([
-    {axis: 'both', kind: 'padding', amount: {form: 'pixels', pixels: 16}, source: 'p-4'},
+    {axis: 'both', kind: 'padding', amount: {form: 'tailwindScale', steps: 4}, source: 'p-4'},
   ])
   expect(scanValues('<div className="gap-x-3 space-y-1"/>')).toEqual([
-    {axis: 'horizontal', kind: 'gap', amount: {form: 'pixels', pixels: 12}, source: 'gap-x-3'},
-    {axis: 'vertical', kind: 'gap', amount: {form: 'pixels', pixels: 4}, source: 'space-y-1'},
+    {axis: 'horizontal', kind: 'gap', amount: {form: 'tailwindScale', steps: 3}, source: 'gap-x-3'},
+    {axis: 'vertical', kind: 'gap', amount: {form: 'tailwindScale', steps: 1}, source: 'space-y-1'},
   ])
 })
 
 test('space-axis reverse modifiers do not declare spacing amounts', () => {
   expect(scanValues('<div className="space-x-4 rtl:space-x-reverse space-y-2 space-y-reverse"/>')).toEqual([
-    {axis: 'horizontal', kind: 'gap', amount: {form: 'pixels', pixels: 16}, source: 'space-x-4'},
-    {axis: 'vertical', kind: 'gap', amount: {form: 'pixels', pixels: 8}, source: 'space-y-2'},
+    {axis: 'horizontal', kind: 'gap', amount: {form: 'tailwindScale', steps: 4}, source: 'space-x-4'},
+    {axis: 'vertical', kind: 'gap', amount: {form: 'tailwindScale', steps: 2}, source: 'space-y-2'},
   ])
 })
 
 test('arbitrary values parse in px and rem; the rest stay as written', () => {
   expect(scanValues('<div className="mb-[13px]"/>')).toEqual([
-    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 13}, source: 'mb-[13px]'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'length', value: 13, unit: 'px'}, source: 'mb-[13px]'},
   ])
   expect(scanValues('<div className="m-[0.5rem]"/>')).toEqual([
-    {axis: 'both', kind: 'margin', amount: {form: 'pixels', pixels: 8}, source: 'm-[0.5rem]'},
+    {axis: 'both', kind: 'margin', amount: {form: 'length', value: 0.5, unit: 'rem'}, source: 'm-[0.5rem]'},
   ])
   expect(scanValues('<div className="gap-[10%]"/>')).toEqual([
     {axis: 'both', kind: 'gap', amount: {form: 'keyword', text: '10%'}, source: 'gap-[10%]'},
@@ -394,7 +442,7 @@ test('the distribution keeps repeated positive and negative keyword amounts sepa
     '  </main>',
     '}',
   ].join('\n')
-  const report = formatSpacingReport([{file: 'fixture.tsx', scan: scanSpacingSource('fixture.tsx', source)}], false)
+  const report = formatSpacingReport([auditSpacingSource('fixture.tsx', source)], reportOptions)
   expect(report).toContain(`'-10%' ×2`)
   expect(report).toContain(`'10%' ×2`)
   expect(report).not.toContain(`'10%' ×4`)
@@ -402,19 +450,19 @@ test('the distribution keeps repeated positive and negative keyword amounts sepa
 
 test('variant-prefixed amounts are part of the vocabulary; auto margins are not amounts', () => {
   expect(scanValues('<div className="md:hover:mb-2"/>')).toEqual([
-    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 8}, source: 'md:hover:mb-2'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'tailwindScale', steps: 2}, source: 'md:hover:mb-2'},
   ])
   expect(scanValues('<div className="mt-auto mx-auto"/>')).toEqual([])
 })
 
 test('literal inline styles contribute amounts, names, and computed markers', () => {
   expect(scanValues('<div style={{marginTop: 8, rowGap: -4}}/>')).toEqual([
-    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 8}, source: 'marginTop'},
-    {axis: 'vertical', kind: 'gap', amount: {form: 'pixels', pixels: -4}, source: 'rowGap'},
+    {axis: 'vertical', kind: 'margin', amount: {form: 'length', value: 8, unit: 'px'}, source: 'marginTop'},
+    {axis: 'vertical', kind: 'gap', amount: {form: 'length', value: -4, unit: 'px'}, source: 'rowGap'},
   ])
   expect(scanValues(`<div style={{padding: '12px', columnGap: '0.5rem'}}/>`)).toEqual([
-    {axis: 'both', kind: 'padding', amount: {form: 'pixels', pixels: 12}, source: 'padding'},
-    {axis: 'horizontal', kind: 'gap', amount: {form: 'pixels', pixels: 8}, source: 'columnGap'},
+    {axis: 'both', kind: 'padding', amount: {form: 'length', value: 12, unit: 'px'}, source: 'padding'},
+    {axis: 'horizontal', kind: 'gap', amount: {form: 'length', value: 0.5, unit: 'rem'}, source: 'columnGap'},
   ])
   expect(scanValues('<div style={{marginRight: y}}/>')).toEqual([
     {axis: 'horizontal', kind: 'margin', amount: {form: 'named', name: 'y'}, source: 'marginRight'},
@@ -432,7 +480,7 @@ test('offsets and non-spacing classes stay out of the distribution', () => {
 test('rare values past the cap print on their own line with locations', () => {
   const divs = Array.from({length: 14}, (_, index) => `<div className="mb-[${101 + index}px]"/>`).join('\n    ')
   const source = `export function Fixture() {\n  return <main>\n    ${divs}\n  </main>\n}\n`
-  const report = formatSpacingReport([{file: 'fixture.tsx', scan: scanSpacingSource('fixture.tsx', source)}], false)
+  const report = formatSpacingReport([auditSpacingSource('fixture.tsx', source)], reportOptions)
   expect(report).toContain('101px ×1 (fixture.tsx:3:5)')
   expect(report).toContain('    rare: 113px (fixture.tsx:15:5) · 114px (fixture.tsx:16:5)')
 })
@@ -449,10 +497,93 @@ test('the report renders the distribution grouped by axis and kind', () => {
     '  </main>',
     '}',
   ].join('\n')
-  const report = formatSpacingReport([{file: 'fixture.tsx', scan: scanSpacingSource('fixture.tsx', source)}], false)
-  expect(report).toContain('spacing values (Tailwind scale at 4px a step; named values are computed in TS):')
+  const report = formatSpacingReport([auditSpacingSource('fixture.tsx', source)], reportOptions)
+  expect(report).toContain('spacing values (named values are computed in TypeScript):')
   expect(report).toContain('  vertical margin: 8px ×3 · 10px ×1 (fixture.tsx:6:5)')
   expect(report).toContain('  vertical gap: gap ×1 (fixture.tsx:7:5)')
+  expect(report).toContain('assumptions: Tailwind numeric spacing step = 0.25rem; root font size = 16px.')
+})
+
+test('coverage counts every intrinsic element, including elements with no spacing attributes', () => {
+  const audit = auditSpacingSource('fixture.tsx', `export function Fixture() {
+  return <><main/><span className={dynamicClasses}/><Card className="mt-2"/></>
+}`)
+  expect(audit.elements).toHaveLength(2)
+  expect(audit.elements.map(element => element.coverage)).toEqual([
+    {kind: 'complete'},
+    {kind: 'unsupported', reason: {kind: 'computedClassName'}},
+  ])
+})
+
+test('a computed position without another visible spacing fact is unsupported', () => {
+  const audit = auditSpacingSource('fixture.tsx', `export const fixture = <div style={{position: mode}}/>`)
+  expect(audit.elements[0]?.coverage).toEqual({kind: 'unsupported', reason: {kind: 'computedPosition'}})
+})
+
+test('partial coverage keeps every independent reason and visible ownership finding', () => {
+  const result = scanElements(`<div
+    className={cn('mt-2', extra)}
+    style={{...styles, marginTop: y, position: mode}}
+    {...props}
+  />`)
+  expect(result.details).toEqual([
+    {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'marginTop', className: 'mt-2'},
+  ])
+  expect(result.limitedCoverage).toEqual([{
+    kind: 'partial',
+    reasons: [
+      {kind: 'partialClassName'},
+      {kind: 'opaqueStyleMember'},
+      {kind: 'computedPosition'},
+      {kind: 'spreadAttributes'},
+    ],
+  }])
+})
+
+test('coverage limits are reported separately and do not inflate the finding count', () => {
+  const audit = auditSpacingSource(
+    'fixture.tsx',
+    `export const fixture = <div className={cn('mt-2', extra)} style={{marginTop: 8}}/>`,
+  )
+  const report = formatSpacingReport([audit], reportOptions)
+  expect(report).toContain('warning [spacing-mixed-margin]')
+  expect(report).toContain('coverage limits:')
+  expect(report).not.toContain('[spacing-unscannable]')
+  expect(report).toContain('spacing ownership: 1 element with a visible inline margin or offset; 1 finding.')
+  expect(report).toContain('coverage: 0/1 intrinsic element fully scanned; 1 partial; 0 unsupported')
+})
+
+test('coverage detail is capped while the aggregate remains exact', () => {
+  const elements = Array.from({length: 22}, () => '<div {...props}/>').join('')
+  const audit = auditSpacingSource('fixture.tsx', `export const fixture = <>${elements}</>`)
+  const report = formatSpacingReport([audit], reportOptions)
+  expect(report).toContain('+2 more coverage-limited elements')
+  expect(report).toContain('coverage: 0/22 intrinsic elements fully scanned; 0 partial; 22 unsupported')
+})
+
+test('the report prints only the normalization assumptions it actually uses', () => {
+  const pixels = formatSpacingReport([
+    auditSpacingSource('pixels.tsx', `export const fixture = <div style={{padding: '12px'}}/>`),
+  ], reportOptions)
+  expect(pixels).not.toContain('assumptions:')
+
+  const rem = formatSpacingReport([
+    auditSpacingSource('rem.tsx', `export const fixture = <div style={{padding: '0.5rem'}}/>`),
+  ], reportOptions)
+  expect(rem).toContain('assumptions: root font size = 16px.')
+  expect(rem).not.toContain('Tailwind numeric spacing step')
+})
+
+test('the report rejects invalid normalization assumptions at its public boundary', () => {
+  const audit = auditSpacingSource('fixture.tsx', `export const fixture = <div className="mt-2"/>`)
+  expect(() => formatSpacingReport([audit], {
+    pretty: false,
+    normalization: {tailwindStepRem: 0, rootFontSizePx: 16},
+  })).toThrow('positive finite Tailwind step')
+  expect(() => formatSpacingReport([audit], {
+    pretty: false,
+    normalization: {tailwindStepRem: 0.25, rootFontSizePx: Number.NaN},
+  })).toThrow('positive finite root font size')
 })
 
 // CLI coverage: the spacing command reads the file list from the resolved tsconfig
@@ -508,7 +639,8 @@ test('fr --spacing prints project findings and exits 0', () => {
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain('overlay.tsx(2,10): warning [spacing-no-position]:')
     expect(result.stdout).toContain(`overlay.tsx(2,10): warning [spacing-mixed-margin]: class 'mt-2'`)
-    expect(result.stdout).toContain('spacing: 1 element spaced by inline styles across 2 scanned files; 2 findings (2 warnings, 0 notes).')
+    expect(result.stdout).toContain('spacing ownership: 1 element with a visible inline margin or offset; 2 findings.')
+    expect(result.stdout).toContain('coverage: 1/1 intrinsic element fully scanned; 0 partial; 0 unsupported across 2 files.')
   } finally {
     rmSync(directory, {recursive: true, force: true})
   }
@@ -523,8 +655,9 @@ test('fr --spacing <file> narrows the output to that file', () => {
     })
     const narrowed = runCli(directory, '--spacing', 'clean.tsx')
     expect(narrowed.exitCode).toBe(0)
-    expect(narrowed.stdout).toContain('No spacing findings.')
-    expect(narrowed.stdout).toContain('spacing: 1 element spaced by inline styles across 1 scanned file; 0 findings (0 warnings, 0 notes).')
+    expect(narrowed.stdout).toContain('No spacing ownership findings.')
+    expect(narrowed.stdout).toContain('spacing ownership: 1 element with a visible inline margin or offset; 0 findings.')
+    expect(narrowed.stdout).toContain('coverage: 1/1 intrinsic element fully scanned; 0 partial; 0 unsupported across 1 file.')
 
     const outside = runCli(directory, '--spacing', join('..', 'elsewhere.tsx'))
     expect(outside.exitCode).toBe(1)
@@ -559,14 +692,14 @@ test('fr --spacing follows imports without type-checking and excludes non-projec
     const project = runCli(directory, '--spacing')
     expect(project.exitCode).toBe(0)
     expect(project.stdout).toContain('overlay.tsx(3,10): warning [spacing-no-position]:')
-    expect(project.stdout).toContain('across 3 scanned files')
+    expect(project.stdout).toContain('across 3 files')
     expect(project.stdout).not.toContain('mt-96')
     expect(project.stdout).not.toContain('mt-80')
 
     const targeted = runCli(directory, '--spacing', 'overlay.tsx')
     expect(targeted.exitCode).toBe(0)
     expect(targeted.stdout).toContain('overlay.tsx(3,10): warning [spacing-no-position]:')
-    expect(targeted.stdout).toContain('across 1 scanned file')
+    expect(targeted.stdout).toContain('across 1 file')
 
     for (const excluded of ['unused.tsx', 'types.d.ts', join('node_modules', 'dependency.tsx')]) {
       const result = runCli(directory, '--spacing', excluded)
