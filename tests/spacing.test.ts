@@ -27,28 +27,38 @@ test('a literal position style property also satisfies positioning', () => {
   expect(scanElements(`<div style={{position: 'fixed', left: x}}/>`).details).toEqual([])
 })
 
-test('an inline offset on an element in document flow is a finding', () => {
+test('an inline offset on an element with no CSS position is dead and reported', () => {
   expect(scanElements('<div style={{top: y}}/>').details).toEqual([
-    {kind: 'inFlowPositionOffset', styleProperty: 'top', positionClass: null},
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
   ])
 })
 
-test('an in-flow position class is named in the finding', () => {
-  expect(scanElements('<div className="relative" style={{top: y}}/>').details).toEqual([
-    {kind: 'inFlowPositionOffset', styleProperty: 'top', positionClass: 'relative'},
+test('an explicit static class is named in the finding', () => {
+  expect(scanElements('<div className="static" style={{top: y}}/>').details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: 'static'},
   ])
+})
+
+// From MJ Gallery: a sticky element's inline top is its sticking threshold, and a
+// relative element's inline offset is a visual nudge that never moves siblings. Both are
+// single-owner patterns, not mixtures.
+test('sticky and relative elements accept inline offsets cleanly', () => {
+  expect(scanElements('<div className="sticky" style={{top: y}}/>').details).toEqual([])
+  expect(scanElements('<div className="relative" style={{left: x}}/>').details).toEqual([])
+  expect(scanElements(`<div style={{position: 'sticky', top: y}}/>`).details).toEqual([])
+  expect(scanElements(`<div style={{position: 'relative', left: x}}/>`).details).toEqual([])
 })
 
 test('a literal position style property overrides position classes', () => {
-  expect(scanElements(`<div className="relative" style={{position: 'absolute', top: y}}/>`).details).toEqual([])
-  expect(scanElements(`<div className="absolute" style={{position: 'relative', top: y}}/>`).details).toEqual([
-    {kind: 'inFlowPositionOffset', styleProperty: 'top', positionClass: null},
+  expect(scanElements(`<div className="static" style={{position: 'absolute', top: y}}/>`).details).toEqual([])
+  expect(scanElements(`<div className="absolute" style={{position: 'static', top: y}}/>`).details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
   ])
 })
 
 test('a variant-prefixed position class does not satisfy positioning', () => {
   expect(scanElements('<div className="md:absolute" style={{top: y}}/>').details).toEqual([
-    {kind: 'inFlowPositionOffset', styleProperty: 'top', positionClass: null},
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
   ])
 })
 
@@ -75,19 +85,50 @@ test('shorthand, negative, important, and variant-prefixed margins still match',
   ])
 })
 
-test('an offset class competing with the inline offset is a finding', () => {
+test('an offset class competing with the same inline offset property is a finding', () => {
   expect(scanElements('<div className="absolute top-0" style={{top: y}}/>').details).toEqual([
-    {kind: 'offsetClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'top-0'},
+    {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'top-0'},
   ])
 })
 
-test('inset classes match by their axis', () => {
+// From MJ Gallery: pinning one edge with a class while the inline style sets the
+// opposite edge is the standard technique for sizing an absolute element by its edges —
+// `left-0` plus inline right, or `bottom-4` plus inline top. The declarations cooperate,
+// so only the same property competes.
+test('opposite-edge pinning on the same axis is clean', () => {
+  expect(scanElements('<div className="absolute left-0" style={{right: x}}/>').details).toEqual([])
+  expect(scanElements('<div className="absolute bottom-4" style={{top: y}}/>').details).toEqual([])
+})
+
+test('inset classes match by the properties they contain', () => {
   expect(scanElements('<div className="absolute inset-x-0" style={{top: y}}/>').details).toEqual([])
   expect(scanElements('<div className="absolute inset-y-0" style={{top: y}}/>').details).toEqual([
-    {kind: 'offsetClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'inset-y-0'},
+    {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'inset-y-0'},
   ])
   expect(scanElements('<div className="absolute inset-0" style={{top: y}}/>').details).toEqual([
-    {kind: 'offsetClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'inset-0'},
+    {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'inset-0'},
+  ])
+})
+
+// From MJ Gallery: `before:` and `[&>*]:` variants style a pseudo-element or other
+// elements through a selector, so their spacing never conflicts with this element's
+// inline style. Auto margins are alignment, not a spacing amount.
+test('pseudo-element variants, selector variants, and auto margins never conflict', () => {
+  expect(scanElements('<div className="absolute before:inset-0" style={{top: y}}/>').details).toEqual([])
+  expect(scanElements(`<div className="absolute before:top-[calc(100%-2px)]" style={{top: y}}/>`).details).toEqual([])
+  expect(scanElements('<div className="absolute [&>*]:mt-2" style={{top: y}}/>').details).toEqual([])
+  expect(scanElements('<div className="absolute m-auto" style={{left: x}}/>').details).toEqual([])
+  expect(scanElements('<div className="mt-auto" style={{marginBottom: y}}/>').details).toEqual([])
+})
+
+// From MJ Gallery: Tailwind v4 marks important with a trailing `!`, and such a class
+// beats the inline style, so the conflict is worth reporting with the exact token.
+test('trailing-important utilities still match', () => {
+  expect(scanElements('<div className="absolute last:mr-0!" style={{marginRight: x}}/>').details).toEqual([
+    {kind: 'marginClassOnOwnedAxis', axis: 'horizontal', styleProperty: 'marginRight', className: 'last:mr-0!'},
+  ])
+  expect(scanElements('<div className="absolute! top-0!" style={{top: y}}/>').details).toEqual([
+    {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'top-0!'},
   ])
 })
 
@@ -106,7 +147,7 @@ test('an inline margin owns its axis without needing positioning', () => {
 test('a shorthand style property claims its axis', () => {
   const source = 'export function Fixture() {\n  const top = 4\n  return <div style={{top}}/>\n}\n'
   expect(scanSpacingSource('fixture.tsx', source).findings.map(finding => finding.detail)).toEqual([
-    {kind: 'inFlowPositionOffset', styleProperty: 'top', positionClass: null},
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
   ])
 })
 
@@ -161,7 +202,7 @@ test('the class attribute name works like className', () => {
 
 test('a custom class sharing a utility root is a known false positive', () => {
   expect(scanElements('<div className="absolute top-level-nav" style={{top: y}}/>').details).toEqual([
-    {kind: 'offsetClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'top-level-nav'},
+    {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'top-level-nav'},
   ])
 })
 
@@ -177,8 +218,8 @@ test('findings carry the element position and sort by document order', () => {
   const scan = scanSpacingSource('fixture.tsx', source)
   expect(scan.inlineSpacedElements).toBe(2)
   expect(scan.findings.map(finding => [finding.line, finding.detail.kind])).toEqual([
-    [3, 'inFlowPositionOffset'],
-    [4, 'inFlowPositionOffset'],
+    [3, 'offsetWithoutPosition'],
+    [4, 'offsetWithoutPosition'],
   ])
 })
 
@@ -229,7 +270,7 @@ test('fr --spacing prints project findings and exits 0', () => {
     })
     const result = runCli(directory, '--spacing')
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain('overlay.tsx(2,10): warning [spacing-in-flow]:')
+    expect(result.stdout).toContain('overlay.tsx(2,10): warning [spacing-no-position]:')
     expect(result.stdout).toContain(`overlay.tsx(2,10): warning [spacing-mixed-margin]: class 'mt-2'`)
     expect(result.stdout).toContain('spacing: 1 element spaced by inline styles across 2 scanned files; 2 findings (2 warnings, 0 notes).')
   } finally {

@@ -160,11 +160,13 @@ Freerange could theoretically support a much larger subset of TS, and did before
 
 ## Spacing ownership
 
-`bun fr.ts --spacing` is the first slice of layout-consistency checking. The idea: every element axis should have exactly one spacing owner. An element whose inline `style` sets `top`, `bottom`, `left`, `right`, `inset`, or a margin is spaced by TypeScript values on that axis, and the scan reports a second spacing system acting on the same axis:
+`bun fr.ts --spacing` is the first slice of layout-consistency checking. The idea: every element axis should have exactly one spacing owner. An element whose inline `style` sets `top`, `bottom`, `left`, `right`, `inset`, or a margin is spaced by TypeScript values on that axis, and the scan reports a second spacing system acting on that spacing:
 
-- an inline position offset on an element still in normal document flow, where the browser's layout and the computed offset both move the element
+- an inline position offset on an element with no CSS position — the browser applies offsets only to positioned elements, so the computed value is dead
 - a margin class such as `mt-4` on an axis the inline style already spaces — margins also move absolutely positioned boxes, so both systems apply at runtime
-- an offset class such as `top-0` competing with the same inline offset, where one of the two silently wins
+- a class setting the same offset property as the inline style, e.g. `left-1/2` against an inline `left`, or `inset-0`, which contains it — one of the two silently wins
+
+The rule boundaries follow how positioning is actually used, checked against a large production codebase: a `sticky` element's `top` is its sticking threshold and a `relative` element's offset is a visual nudge, so both accept inline offsets cleanly; a class pinning one edge while the inline style sets the opposite edge (`left-0` with inline `right`) is the standard way to size an absolute element and is not a conflict; pseudo-element variants such as `before:top-0` style a different box; and auto margins are alignment, not a spacing amount.
 
 The scan reads syntax only. It does not type-check — the file list comes from the resolved `tsconfig.json`, but no TypeScript program is created — so it runs on files with type errors and always exits 0. It checks intrinsic elements (lowercase tags), not component props, and matches class names against Tailwind's spacing utilities by their utility root, so a custom class that reuses a root, e.g. `top-level-nav`, is a known false positive. Constructs the scan cannot read — a props spread, a computed `className`, a spread inside the style object — are reported as unscannable notes rather than guessed, one per element, matching the first-blocker policy used for unsupported functions. Library users can call `scanSpacingSource(file, source)` for the same findings as structured data.
 
