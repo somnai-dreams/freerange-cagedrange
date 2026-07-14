@@ -2,10 +2,13 @@ import {expect, test} from 'bun:test'
 import {existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join} from 'node:path'
+import {fileURLToPath} from 'node:url'
 import * as ts from 'typescript'
 import {formatTypeScriptDiagnostics} from '../src/typescript/diagnostics.ts'
 
-const freerangeCli = new URL('../fr.ts', import.meta.url).pathname
+// fileURLToPath rather than URL.pathname: the pathname keeps percent-encoding, so a
+// checkout under a directory with a space cannot resolve the CLI module.
+const freerangeCli = fileURLToPath(new URL('../fr.ts', import.meta.url))
 
 function runCli(cwd: string, ...arguments_: string[]) {
   const result = Bun.spawnSync({

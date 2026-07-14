@@ -1,4 +1,5 @@
 import {describe, expect, test} from 'bun:test'
+import {fileURLToPath} from 'node:url'
 import {analyzeFile, analyzeSource, formatReport} from '../src/index.ts'
 import {analyzedFunction, requirementsBesidesInputFiniteness} from './analyze-helpers.ts'
 
@@ -657,7 +658,7 @@ describe('acceptance and module safety', () => {
   })
 
   test('reads imported const numeric literals exactly; other imports still stop', () => {
-    const importsFixture = new URL('./fixtures/module-imports.ts', import.meta.url).pathname
+    const importsFixture = fileURLToPath(new URL('./fixtures/module-imports.ts', import.meta.url))
     const importsReportPath = 'tests/fixtures/module-imports.ts'
     const report = analyzeFile(importsFixture)
     expect(report.functions).toEqual([{

@@ -1,12 +1,13 @@
 import {describe, expect, test} from 'bun:test'
+import {fileURLToPath} from 'node:url'
 import * as ts from 'typescript'
 import {analyzeCheckedSource} from '../src/analyze.ts'
 import {analyzeFile, analyzeSource} from '../src/index.ts'
 import {createReport} from '../src/report/index.ts'
 import {analyzedFunction, requirementsBesidesInputFiniteness} from './analyze-helpers.ts'
 
-const fixture = new URL('./fixtures/console-assertions.ts', import.meta.url).pathname
-const importedFixture = new URL('./fixtures/console-assertions-imported.ts', import.meta.url).pathname
+const fixture = fileURLToPath(new URL('./fixtures/console-assertions.ts', import.meta.url))
+const importedFixture = fileURLToPath(new URL('./fixtures/console-assertions-imported.ts', import.meta.url))
 const fixtureReport = analyzeFile(fixture)
 
 describe('static console.assert contracts', () => {

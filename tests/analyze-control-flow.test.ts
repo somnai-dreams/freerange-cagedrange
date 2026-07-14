@@ -1,14 +1,15 @@
 import {describe, expect, test} from 'bun:test'
 import {readFileSync} from 'node:fs'
+import {fileURLToPath} from 'node:url'
 import {analyzeFile, analyzeSource, formatReport} from '../src/index.ts'
 import {analyzedFunction, requirementsBesidesInputFiniteness} from './analyze-helpers.ts'
 
-const fixture = new URL('./fixtures/grid-metrics.ts', import.meta.url).pathname
-const showcaseFixture = new URL('./fixtures/showcase.ts', import.meta.url).pathname
-const demoFixture = new URL('../demo/index.ts', import.meta.url).pathname
+const fixture = fileURLToPath(new URL('./fixtures/grid-metrics.ts', import.meta.url))
+const showcaseFixture = fileURLToPath(new URL('./fixtures/showcase.ts', import.meta.url))
+const demoFixture = fileURLToPath(new URL('../demo/index.ts', import.meta.url))
 const showcaseReportPath = 'tests/fixtures/showcase.ts'
-const mutationFixture = new URL('./fixtures/object-mutation.ts', import.meta.url).pathname
-const preconditionsFixture = new URL('./fixtures/preconditions.ts', import.meta.url).pathname
+const mutationFixture = fileURLToPath(new URL('./fixtures/object-mutation.ts', import.meta.url))
+const preconditionsFixture = fileURLToPath(new URL('./fixtures/preconditions.ts', import.meta.url))
 const preconditionsReportPath = 'tests/fixtures/preconditions.ts'
 
 describe('control flow and contracts', () => {
