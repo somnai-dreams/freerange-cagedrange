@@ -19,5 +19,7 @@ export function auditSource(file: string, source: string): FileAudit {
 
 export {formatReport} from './report/index.ts'
 export {formatFileAuditUnit, refactorGuide, refactorGuides} from './audit.ts'
+export {formatSpacingReport, scanSpacingSource, spacingPreamble} from './spacing.ts'
 export type {AuditCoverage, AuditReason, AuditReference, FileAudit, RefactorGuide, RefactorGuideID} from './audit.ts'
 export type {AnalysisReport} from './report/index.ts'
+export type {SpacingAxis, SpacingFileScan, SpacingFinding, SpacingFindingDetail, SpacingPathScan, UnscannableCause} from './spacing.ts'

@@ -23,8 +23,9 @@ There's no API =). Your TypeScript code provides enough information for Freerang
 
 - `fr`: print project errors and warnings
 - `fr --audit`: print every function's contracts, plus refactor suggestions to help Freerange analyze better. Great for agents
+- `fr --spacing`: scan JSX for spacing-ownership findings — elements that mix inline-style positioning with class-based spacing
 
-Pass a file path to either command to filter down to just that file's report.
+Pass a file path to any command to filter down to just that file's report.
 
 `fr` directly uses TypeScript under the hood, so it naturally respects your `tsconfig`. We output TS errors before our analysis, so technically, you can swap out your explicit `tsc --noEmit` command for `fr` and nothing changes!
 
@@ -156,6 +157,16 @@ Freerange could theoretically support a much larger subset of TS, and did before
 - **Check and use the same local value.** When a value comes from module, class, or reactive state, store it in a local first. For example, write `const currentScale = scale; if (currentScale !== null) return currentScale` instead of checking one read of `scale` and returning another.
 
 - **Use precise TypeScript types.** Avoid `any`, casts, and suppression comments. Parse external data before passing it to a numeric helper, give the helper typed parameters, and pass only the fields it uses. A file containing `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, or `eval` is rejected because its declared types cannot be trusted.
+
+## Spacing ownership
+
+`bun fr.ts --spacing` is the first slice of layout-consistency checking. The idea: every element axis should have exactly one spacing owner. An element whose inline `style` sets `top`, `bottom`, `left`, `right`, `inset`, or a margin is spaced by TypeScript values on that axis, and the scan reports a second spacing system acting on the same axis:
+
+- an inline position offset on an element still in normal document flow, where the browser's layout and the computed offset both move the element
+- a margin class such as `mt-4` on an axis the inline style already spaces — margins also move absolutely positioned boxes, so both systems apply at runtime
+- an offset class such as `top-0` competing with the same inline offset, where one of the two silently wins
+
+The scan reads syntax only. It does not type-check — the file list comes from the resolved `tsconfig.json`, but no TypeScript program is created — so it runs on files with type errors and always exits 0. It checks intrinsic elements (lowercase tags), not component props, and matches class names against Tailwind's spacing utilities by their utility root, so a custom class that reuses a root, e.g. `top-level-nav`, is a known false positive. Constructs the scan cannot read — a props spread, a computed `className`, a spread inside the style object — are reported as unscannable notes rather than guessed, one per element, matching the first-blocker policy used for unsupported functions. Library users can call `scanSpacingSource(file, source)` for the same findings as structured data.
 
 ## Recommended TypeScript Config
 

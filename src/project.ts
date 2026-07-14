@@ -6,7 +6,7 @@
 // formats, one file's slice.
 
 import {existsSync, realpathSync} from 'node:fs'
-import {resolve} from 'node:path'
+import {relative, resolve} from 'node:path'
 import * as ts from 'typescript'
 import {analyzeCheckedSource, type DetailedAnalysis} from './analyze.ts'
 import {createFileAudit, formatFileAuditUnit} from './audit.ts'
@@ -14,11 +14,13 @@ import type {AssertionVerdict, FunctionAnalysis, RequirementFailure} from './eng
 import type {SiteID} from './ir/ids.ts'
 import {reportPath, siteLocation} from './ir/program.ts'
 import {formatUnsupportedReason} from './report/index.ts'
+import {formatSpacingReport, scanSpacingSource, type SpacingPathScan} from './spacing.ts'
 import {checkFile} from './typescript/check.ts'
 import {formatDiagnosticLocation, formatDiagnosticPrefix, formatTypeScriptDiagnostics, TypeScriptDiagnosticsError, usePrettyOutput} from './typescript/diagnostics.ts'
 import {
   findTypeScriptConfig,
   loadTypeScriptProjectGraph,
+  projectFileNames,
   projectSources,
   type ProjectSource,
 } from './typescript/project.ts'
@@ -102,6 +104,50 @@ export function runFileAudit(file: string): boolean {
   const target = analyzeTargetFile(file)
   console.log(formatFileAuditUnit(createFileAudit(target.detailed), target.pretty))
   return false
+}
+
+// `fr --spacing`: the spacing ownership scan at project scope. The scan reads syntax
+// only, so the file list comes from the tsconfig graph without creating TypeScript
+// programs, and files with type errors still scan. The command is informational and
+// never fails.
+export function runProjectSpacing(searchFrom: string): boolean {
+  const configPath = findTypeScriptConfig(searchFrom)
+  if (configPath == null) {
+    throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
+  }
+  const {fileNames, rootOptions} = projectFileNames(configPath)
+  const scans = fileNames
+    .filter(file => !file.endsWith('.d.ts'))
+    .map(scanSpacingPath)
+  console.log(formatSpacingReport(scans, usePrettyOutput(rootOptions['pretty'])))
+  return false
+}
+
+// `fr --spacing <file>`: one file's slice of the project spacing scan. The tsconfig is
+// resolved from the current directory like the other commands — the file argument narrows
+// the output, never the configuration — and without a config the file scans alone.
+export function runFileSpacing(file: string): boolean {
+  const absoluteFile = resolve(file)
+  if (!existsSync(absoluteFile)) throw new Error(`File not found: ${absoluteFile}`)
+  const configPath = findTypeScriptConfig(process.cwd())
+  if (configPath == null) {
+    console.log(formatSpacingReport([scanSpacingPath(absoluteFile)], usePrettyOutput(undefined)))
+    return false
+  }
+  const {fileNames, rootOptions} = projectFileNames(configPath)
+  const targetPath = canonicalFilePath(absoluteFile)
+  if (!fileNames.some(candidate => canonicalFilePath(candidate) === targetPath)) {
+    throw new Error(`File is not part of the project resolved from ${configPath}: ${absoluteFile}`)
+  }
+  console.log(formatSpacingReport([scanSpacingPath(absoluteFile)], usePrettyOutput(rootOptions['pretty'])))
+  return false
+}
+
+// Finding lines name files relative to the working directory, matching reportPath.
+function scanSpacingPath(file: string): SpacingPathScan {
+  const source = ts.sys.readFile(file)
+  if (source == null) throw new Error(`Could not read ${file}`)
+  return {file: relative(process.cwd(), file), scan: scanSpacingSource(file, source)}
 }
 
 function analyzeProject(searchFrom: string): ProjectScan {
@@ -407,7 +453,6 @@ function lintLevel(finding: LintFinding): 'error' | 'warning' {
 function formatLintPrefix(finding: LintFinding, rule: string, pretty: boolean): string {
   return formatDiagnosticPrefix(finding, lintLevel(finding), rule, pretty)
 }
-
 function formatCoverage(coverage: ProjectCoverage): string {
   return `coverage: ${coverage.analyzed}/${coverage.functions} named top-level function declarations fully analyzed; ${coverage.partial} partially supported; ${coverage.unsupported} unsupported.`
 }

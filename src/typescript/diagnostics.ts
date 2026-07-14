@@ -1,6 +1,6 @@
 import * as ts from 'typescript'
 
-export type DiagnosticLevel = 'error' | 'warning' | 'suggestion'
+export type DiagnosticLevel = 'error' | 'warning' | 'suggestion' | 'note'
 
 type DiagnosticLocation = {
   file: string

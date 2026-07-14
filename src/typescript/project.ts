@@ -52,6 +52,32 @@ export function loadTypeScriptProjectGraph(configPath: string): LoadedTypeScript
   return loaded
 }
 
+// The spacing scan reads syntax only, so it needs the project's file list without type
+// information: the same tsconfig resolution and reference walk as
+// loadTypeScriptProjectGraph, but no Program is created and no diagnostics are computed.
+// The root options carry the entry config's output settings, e.g. `pretty`. A circular
+// project reference simply terminates the walk here; the graph loader is where cycles
+// are rejected, because only type checking depends on reference order.
+export function projectFileNames(configPath: string): {fileNames: string[]; rootOptions: ts.CompilerOptions} {
+  const entryConfigPath = resolve(configPath)
+  const fileNames = new Set<string>()
+  const visited = new Set<string>()
+  let rootOptions: ts.CompilerOptions = {}
+
+  const load = (requestedConfigPath: string): void => {
+    const absoluteConfigPath = resolve(requestedConfigPath)
+    if (visited.has(absoluteConfigPath)) return
+    visited.add(absoluteConfigPath)
+    const parsed = parseConfig(absoluteConfigPath)
+    if (absoluteConfigPath === entryConfigPath) rootOptions = parsed.options
+    for (const reference of parsed.projectReferences ?? []) load(ts.resolveProjectReferencePath(reference))
+    for (const file of parsed.fileNames) fileNames.add(resolve(file))
+  }
+
+  load(entryConfigPath)
+  return {fileNames: [...fileNames].sort(), rootOptions}
+}
+
 export function projectSources(projects: LoadedTypeScriptProject[]): ProjectSource[] {
   const sources = new Map<string, ProjectSource>()
   for (const project of projects) {
