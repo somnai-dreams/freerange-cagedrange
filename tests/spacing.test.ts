@@ -163,9 +163,54 @@ test('a spread inside the style object makes the element unscannable', () => {
   ])
 })
 
-test('a computed className makes the element unscannable', () => {
-  expect(scanElements(`<div className={'a' + 'b'} style={{top: y}}/>`).details).toEqual([
+test('a fully computed className makes the element unscannable', () => {
+  expect(scanElements('<div className={dynamicClasses} style={{top: y}}/>').details).toEqual([
     {kind: 'unscannable', cause: 'computedClassName'},
+  ])
+})
+
+// The extraction reads cn(...)-style calls, templates, ternaries, and && arms, so the
+// statically visible classes are checked even when the full list is not knowable. The
+// partial note prints after the findings; proving the element unpositioned is the one
+// check that stands down, since an unseen class may add `absolute`.
+test('classes visible inside cn(...) are checked; the unseen rest gets a note', () => {
+  expect(scanElements(`<div className={cn('absolute mt-2', extra)} style={{top: y}}/>`).details).toEqual([
+    {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'mt-2'},
+    {kind: 'unscannable', cause: 'partialClassName'},
+  ])
+  expect(scanElements(`<div className={CN('inset-0', props.className)} style={{top: y}}/>`).details).toEqual([
+    {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'inset-0'},
+    {kind: 'unscannable', cause: 'partialClassName'},
+  ])
+})
+
+test('conditional classes count like variant-prefixed ones, and full branches stay complete', () => {
+  expect(scanElements(`<div className={cond ? 'absolute mt-2' : 'absolute mt-4'} style={{top: y}}/>`).details).toEqual([
+    {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'mt-2'},
+    {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'mt-4'},
+  ])
+  expect(scanElements(`<div className={open && 'mb-2'} style={{marginTop: y}}/>`).details).toEqual([
+    {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'marginTop', className: 'mb-2'},
+  ])
+  expect(scanElements(`<div className={cn({'mt-2': open, absolute: true})} style={{top: y}}/>`).details).toEqual([
+    {kind: 'marginClassOnOwnedAxis', axis: 'vertical', styleProperty: 'top', className: 'mt-2'},
+  ])
+})
+
+test('template classes are read; fused fragments are dropped, never guessed', () => {
+  expect(scanElements('<div className={`absolute ${extra}`} style={{top: y}}/>').details).toEqual([
+    {kind: 'unscannable', cause: 'partialClassName'},
+  ])
+  // `mt-${size}` builds a class the scan cannot name: no mt- token is invented, and
+  // with nothing visible the element falls back to the fully computed note.
+  expect(scanElements('<div className={`mt-${size}`} style={{marginTop: y}}/>').details).toEqual([
+    {kind: 'unscannable', cause: 'computedClassName'},
+  ])
+})
+
+test('extracted class tokens feed the distribution', () => {
+  expect(scanValues(`<div className={cn('px-3', extra)}/>`)).toEqual([
+    {axis: 'horizontal', kind: 'padding', amount: {form: 'pixels', pixels: 12}, source: 'px-3'},
   ])
 })
 

@@ -57,8 +57,11 @@ export type UnscannableCause =
   | 'spreadAttributes'
   // A spread or computed property name inside the style object hides spacing properties.
   | 'opaqueStyleMember'
-  // The className value is computed, so the class list is invisible to the scan.
+  // The className value is computed and nothing in it is statically visible.
   | 'computedClassName'
+  // Some className parts are computed. The visible classes were checked; the rest were
+  // not, and the element cannot be proven unpositioned.
+  | 'partialClassName'
   // The style position value is computed, so the positioning rule cannot run.
   | 'computedPosition'
 
@@ -171,7 +174,7 @@ function scanElement(
   sourceFile: ts.SourceFile,
 ): SpacingFinding[] | null {
   let styleScan: StyleScan | null = null
-  let classTokens: string[] | 'computed' | null = null
+  let classes: ExtractedClasses = {tokens: [], complete: true}
   let hasSpreadAttribute = false
 
   for (const attribute of element.attributes.properties) {
@@ -182,7 +185,7 @@ function scanElement(
     if (!ts.isIdentifier(attribute.name)) continue
     const name = attribute.name.text
     if (name === 'style') styleScan = scanStyleAttribute(attribute)
-    else if (name === 'className' || name === 'class') classTokens = classAttributeTokens(attribute)
+    else if (name === 'className' || name === 'class') classes = classAttributeTokens(attribute)
   }
 
   if (styleScan == null || styleScan.owned.length === 0) return null
@@ -196,10 +199,10 @@ function scanElement(
 
   const ownedOffsets = styleScan.owned.filter(owned => owned.mechanism === 'positionOffset')
 
-  // One unscannable cause per element, checked in the order that hides the most: a props
-  // spread can change anything, an opaque style member hides spacing properties, a
-  // computed className hides the class list, and a computed position value hides only
-  // the positioning rule.
+  // Element-wide unknowns block every check: a props spread can change anything, and an
+  // opaque style member hides which spacing the element even owns. A partly computed
+  // className, by contrast, only narrows the checks — the visible classes are checked
+  // below, and an honesty note prints after them.
   if (hasSpreadAttribute) {
     add({kind: 'unscannable', cause: 'spreadAttributes'})
     return found
@@ -208,32 +211,29 @@ function scanElement(
     add({kind: 'unscannable', cause: 'opaqueStyleMember'})
     return found
   }
-  if (classTokens === 'computed') {
-    add({kind: 'unscannable', cause: 'computedClassName'})
-    return found
-  }
-  if (styleScan.positioned === 'computed' && ownedOffsets.length > 0) {
-    add({kind: 'unscannable', cause: 'computedPosition'})
-    return found
-  }
 
-  const tokens = (classTokens ?? []).flatMap(token => {
+  const tokens = classes.tokens.flatMap(token => {
     const classified = classifyToken(token)
     return classified == null ? [] : [classified]
   })
 
   if (ownedOffsets.length > 0) {
-    const status = styleScan.positioned === 'computed' || styleScan.positioned == null
-      ? positionStatusFromClasses(tokens)
-      : styleScan.positioned
-    if (status === 'none') {
-      const staticClass = tokens.find(token =>
-        token.kind === 'position' && token.status === 'none' && !token.variantPrefixed)
-      add({
-        kind: 'offsetWithoutPosition',
-        styleProperty: ownedOffsets[0]!.styleProperty,
-        positionClass: styleScan.positioned == null && staticClass?.kind === 'position' ? staticClass.token : null,
-      })
+    if (styleScan.positioned === 'computed') {
+      add({kind: 'unscannable', cause: 'computedPosition'})
+    } else {
+      const status = styleScan.positioned ?? positionStatusFromClasses(tokens)
+      // Proving the offset dead needs the full class list: with parts of the className
+      // unseen, a positioning class may be hiding there, so the check stands down and
+      // the partial note below covers the element.
+      if (status === 'none' && (styleScan.positioned != null || classes.complete)) {
+        const staticClass = tokens.find(token =>
+          token.kind === 'position' && token.status === 'none' && !token.variantPrefixed)
+        add({
+          kind: 'offsetWithoutPosition',
+          styleProperty: ownedOffsets[0]!.styleProperty,
+          positionClass: styleScan.positioned == null && staticClass?.kind === 'position' ? staticClass.token : null,
+        })
+      }
     }
   }
 
@@ -256,6 +256,12 @@ function scanElement(
       add({kind: 'offsetClassOnOwnedProperty', property: shared, styleProperty: owned.styleProperty, className: token.token})
       break
     }
+  }
+
+  // The honesty note prints after the findings: the checks above covered the visible
+  // classes, and this line marks that unseen ones exist.
+  if (!classes.complete) {
+    add({kind: 'unscannable', cause: classes.tokens.length > 0 ? 'partialClassName' : 'computedClassName'})
   }
 
   return found
@@ -395,22 +401,193 @@ function ownedSpacingForProperty(name: string): OwnedSpacing | null {
   }
 }
 
-function classAttributeTokens(attribute: ts.JsxAttribute): string[] | 'computed' {
+// The class tokens statically visible in a className value, and whether that is all of
+// them. A plain string is complete; a cn(...) call or template with dynamic parts
+// yields the tokens the scan can see, with complete false so the checks that need the
+// full list (proving an element unpositioned) know to stand down.
+type ExtractedClasses = {tokens: string[]; complete: boolean}
+
+function classAttributeTokens(attribute: ts.JsxAttribute): ExtractedClasses {
   const initializer = attribute.initializer
   // A bare `className` attribute carries no classes.
-  if (initializer == null) return []
-  if (ts.isStringLiteral(initializer)) return splitClassTokens(initializer.text)
+  if (initializer == null) return {tokens: [], complete: true}
+  if (ts.isStringLiteral(initializer)) return {tokens: splitClassTokens(initializer.text), complete: true}
   if (ts.isJsxExpression(initializer)) {
     const expression = initializer.expression
-    if (expression != null && (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression))) {
-      return splitClassTokens(expression.text)
-    }
+    if (expression == null) return {tokens: [], complete: false}
+    const extracted = extractClassExpression(expression)
+    // Branches repeating a token (cond ? 'absolute mt-2' : 'absolute mt-4') fold it.
+    return {tokens: [...new Set(extracted.tokens)], complete: extracted.complete}
   }
-  return 'computed'
+  return {tokens: [], complete: false}
 }
 
 function splitClassTokens(text: string): string[] {
   return text.split(/\s+/).filter(token => token !== '')
+}
+
+// Class-combining helpers that join their arguments with spaces, matched by lowercased
+// name so a project wrapper like CN(...) counts. Their semantics differ in merging
+// (twMerge drops earlier conflicting utilities), but every token the scan extracts was
+// written by the author, which is what the vocabulary and the conflict checks report on.
+const classCombinerNames = new Set(['cn', 'clsx', 'cx', 'classnames', 'twmerge', 'twjoin'])
+
+// Extracts the statically visible class tokens from a className expression. Alternatives
+// (ternaries, &&, ||) contribute the tokens of every branch: a conditional margin is
+// still a spacing system on the element, the same reading variant prefixes get. Unknown
+// parts (identifiers, prop passthroughs, unrecognized calls) contribute nothing and
+// clear the complete flag.
+function extractClassExpression(expression: ts.Expression): ExtractedClasses {
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return {tokens: splitClassTokens(expression.text), complete: true}
+  }
+  if (ts.isParenthesizedExpression(expression)) return extractClassExpression(expression.expression)
+  if (ts.isTemplateExpression(expression)) return extractFromPieces(templatePieces(expression))
+  if (ts.isConditionalExpression(expression)) {
+    return unionExtracted(extractClassExpression(expression.whenTrue), extractClassExpression(expression.whenFalse))
+  }
+  if (ts.isBinaryExpression(expression)) {
+    switch (expression.operatorToken.kind) {
+      case ts.SyntaxKind.PlusToken:
+        return extractFromPieces(concatPieces(expression))
+      // The left of && is a condition; the value is either falsy (no classes) or the
+      // right side, so the right side's tokens and completeness carry over.
+      case ts.SyntaxKind.AmpersandAmpersandToken:
+        return extractClassExpression(expression.right)
+      case ts.SyntaxKind.BarBarToken:
+      case ts.SyntaxKind.QuestionQuestionToken:
+        return unionExtracted(extractClassExpression(expression.left), extractClassExpression(expression.right))
+      default:
+        return {tokens: [], complete: false}
+    }
+  }
+  if (ts.isCallExpression(expression) && ts.isIdentifier(expression.expression)
+    && classCombinerNames.has(expression.expression.text.toLowerCase())) {
+    let combined: ExtractedClasses = {tokens: [], complete: true}
+    for (const argument of expression.arguments) {
+      combined = unionExtracted(combined, extractCombinerArgument(argument))
+    }
+    return combined
+  }
+  return {tokens: [], complete: false}
+}
+
+// One argument of a cn(...)-style call. Arguments are joined with spaces, so tokens
+// never fuse across them. Objects contribute their keys (clsx includes a key when its
+// value is truthy), arrays flatten, and literal non-strings (false, null, undefined)
+// contribute nothing while staying complete.
+function extractCombinerArgument(argument: ts.Expression): ExtractedClasses {
+  if (ts.isSpreadElement(argument)) return {tokens: [], complete: false}
+  if (ts.isObjectLiteralExpression(argument)) {
+    let combined: ExtractedClasses = {tokens: [], complete: true}
+    for (const member of argument.properties) {
+      if (!ts.isPropertyAssignment(member) && !ts.isShorthandPropertyAssignment(member)) {
+        combined = {tokens: combined.tokens, complete: false}
+        continue
+      }
+      const name = member.name
+      if (ts.isIdentifier(name) || ts.isStringLiteral(name)) {
+        combined = unionExtracted(combined, {tokens: splitClassTokens(name.text), complete: true})
+      } else if (ts.isComputedPropertyName(name)) {
+        combined = unionExtracted(combined, extractClassExpression(name.expression))
+      }
+    }
+    return combined
+  }
+  if (ts.isArrayLiteralExpression(argument)) {
+    let combined: ExtractedClasses = {tokens: [], complete: true}
+    for (const element of argument.elements) {
+      combined = unionExtracted(combined, extractCombinerArgument(element))
+    }
+    return combined
+  }
+  if (argument.kind === ts.SyntaxKind.TrueKeyword
+    || argument.kind === ts.SyntaxKind.FalseKeyword
+    || argument.kind === ts.SyntaxKind.NullKeyword
+    || ts.isNumericLiteral(argument)
+    || (ts.isIdentifier(argument) && argument.text === 'undefined')) {
+    return {tokens: [], complete: true}
+  }
+  return extractClassExpression(argument)
+}
+
+function unionExtracted(left: ExtractedClasses, right: ExtractedClasses): ExtractedClasses {
+  return {tokens: [...left.tokens, ...right.tokens], complete: left.complete && right.complete}
+}
+
+// String concatenation can split a token across parts: `mt-${size}` builds a class the
+// scan cannot name. The pieces model keeps literal text and embedded expressions in
+// order so the tokenizer can drop anything touching a boundary without whitespace.
+type ConcatPiece = {kind: 'text'; text: string} | {kind: 'expression'; extracted: ExtractedClasses}
+
+function templatePieces(template: ts.TemplateExpression): ConcatPiece[] {
+  const pieces: ConcatPiece[] = [{kind: 'text', text: template.head.text}]
+  for (const span of template.templateSpans) {
+    pieces.push({kind: 'expression', extracted: extractClassExpression(span.expression)})
+    pieces.push({kind: 'text', text: span.literal.text})
+  }
+  return pieces
+}
+
+function concatPieces(expression: ts.Expression): ConcatPiece[] {
+  if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    return [...concatPieces(expression.left), ...concatPieces(expression.right)]
+  }
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return [{kind: 'text', text: expression.text}]
+  }
+  if (ts.isTemplateExpression(expression)) return templatePieces(expression)
+  return [{kind: 'expression', extracted: extractClassExpression(expression)}]
+}
+
+// Tokens must be whitespace-delimited within the concatenated string. A token touching
+// an expression boundary without whitespace is dynamic construction — `mt-${size}`, or
+// 'pt-' + value — so the fragment and the expression's boundary token are dropped and
+// the result marked incomplete, never guessed.
+function extractFromPieces(rawPieces: ConcatPiece[]): ExtractedClasses {
+  // Adjacent literal texts concatenate ('mt-' + '2' is mt-2), and empty texts between
+  // expressions hide that the expressions fuse; merging and dropping first makes every
+  // remaining boundary a real text-expression edge.
+  const pieces: ConcatPiece[] = []
+  for (const piece of rawPieces) {
+    const last = pieces.at(-1)
+    if (piece.kind === 'text' && last?.kind === 'text') {
+      pieces[pieces.length - 1] = {kind: 'text', text: last.text + piece.text}
+    } else if (piece.kind !== 'text' || piece.text !== '') {
+      pieces.push(piece)
+    }
+  }
+
+  const tokens: string[] = []
+  let complete = true
+  for (let index = 0; index < pieces.length; index++) {
+    const piece = pieces[index]!
+    const previous = index > 0 ? pieces[index - 1]! : null
+    const next = index + 1 < pieces.length ? pieces[index + 1]! : null
+    if (piece.kind === 'text') {
+      const fusedLeft = previous != null && /^\S/.test(piece.text)
+      const fusedRight = next != null && /\S$/.test(piece.text)
+      const parts = splitClassTokens(piece.text)
+      const kept = parts.slice(fusedLeft ? 1 : 0, fusedRight ? Math.max(parts.length - 1, fusedLeft ? 1 : 0) : parts.length)
+      if (fusedLeft || fusedRight) complete = false
+      tokens.push(...kept)
+    } else {
+      if (!piece.extracted.complete) complete = false
+      let kept = piece.extracted.tokens
+      const previousFuses = previous != null && (previous.kind === 'expression' || /\S$/.test(previous.text))
+      const nextFuses = next != null && (next.kind === 'expression' || /^\S/.test(next.text))
+      if (previousFuses && kept.length > 0) {
+        kept = kept.slice(1)
+        complete = false
+      }
+      if (nextFuses && kept.length > 0) {
+        kept = kept.slice(0, -1)
+        complete = false
+      }
+      tokens.push(...kept)
+    }
+  }
+  return {tokens, complete}
 }
 
 // The distribution collects every margin, padding, and gap amount on the element —
@@ -429,9 +606,7 @@ function collectElementValues(
     if (ts.isJsxSpreadAttribute(attribute) || !ts.isIdentifier(attribute.name)) continue
     const name = attribute.name.text
     if (name === 'className' || name === 'class') {
-      const tokens = classAttributeTokens(attribute)
-      if (tokens === 'computed') continue
-      for (const token of tokens) {
+      for (const token of classAttributeTokens(attribute).tokens) {
         const value = classValueToken(token)
         if (value != null) values.push({...location, ...value, source: token})
       }
@@ -853,6 +1028,8 @@ function unscannableMessage(cause: UnscannableCause): string {
       return 'the style object contains a spread or computed property name, so the element\'s spacing cannot be checked'
     case 'computedClassName':
       return 'className is computed, so class-based spacing cannot be checked'
+    case 'partialClassName':
+      return 'className is partly computed; the statically visible classes were checked, and the rest cannot be'
     case 'computedPosition':
       return 'the position style value is computed, so whether the element is positioned cannot be checked'
   }
