@@ -3,7 +3,7 @@ import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {scanSpacingSource, type SpacingFindingDetail} from '../src/index.ts'
+import {formatSpacingReport, scanSpacingSource, type SpacingFindingDetail, type SpacingValueSite} from '../src/index.ts'
 
 // Each scan wraps the element in a component so the fixture is a complete TSX file; the
 // scan itself never needs the surrounding code to type-check.
@@ -221,6 +221,98 @@ test('findings carry the element position and sort by document order', () => {
     [3, 'offsetWithoutPosition'],
     [4, 'offsetWithoutPosition'],
   ])
+})
+
+function scanValues(elements: string): Array<Pick<SpacingValueSite, 'axis' | 'kind' | 'amount' | 'source'>> {
+  const source = `export function Fixture(y: number) {\n  return <main>${elements}</main>\n}\n`
+  return scanSpacingSource('fixture.tsx', source).values.map(({axis, kind, amount, source: written}) =>
+    ({axis, kind, amount, source: written}))
+}
+
+test('class utilities contribute their amounts on the Tailwind scale', () => {
+  expect(scanValues('<div className="mt-2.5"/>')).toEqual([
+    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 10}, source: 'mt-2.5'},
+  ])
+  expect(scanValues('<div className="-mt-2"/>')).toEqual([
+    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: -8}, source: '-mt-2'},
+  ])
+  expect(scanValues('<div className="mb-px"/>')).toEqual([
+    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 1}, source: 'mb-px'},
+  ])
+  expect(scanValues('<div className="p-4"/>')).toEqual([
+    {axis: 'both', kind: 'padding', amount: {form: 'pixels', pixels: 16}, source: 'p-4'},
+  ])
+  expect(scanValues('<div className="gap-x-3 space-y-1"/>')).toEqual([
+    {axis: 'horizontal', kind: 'gap', amount: {form: 'pixels', pixels: 12}, source: 'gap-x-3'},
+    {axis: 'vertical', kind: 'gap', amount: {form: 'pixels', pixels: 4}, source: 'space-y-1'},
+  ])
+})
+
+test('arbitrary values parse in px and rem; the rest stay as written', () => {
+  expect(scanValues('<div className="mb-[13px]"/>')).toEqual([
+    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 13}, source: 'mb-[13px]'},
+  ])
+  expect(scanValues('<div className="m-[0.5rem]"/>')).toEqual([
+    {axis: 'both', kind: 'margin', amount: {form: 'pixels', pixels: 8}, source: 'm-[0.5rem]'},
+  ])
+  expect(scanValues('<div className="gap-[10%]"/>')).toEqual([
+    {axis: 'both', kind: 'gap', amount: {form: 'keyword', text: '10%'}, source: 'gap-[10%]'},
+  ])
+})
+
+test('variant-prefixed amounts are part of the vocabulary; auto margins are not amounts', () => {
+  expect(scanValues('<div className="md:hover:mb-2"/>')).toEqual([
+    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 8}, source: 'md:hover:mb-2'},
+  ])
+  expect(scanValues('<div className="mt-auto mx-auto"/>')).toEqual([])
+})
+
+test('literal inline styles contribute amounts, names, and computed markers', () => {
+  expect(scanValues('<div style={{marginTop: 8, rowGap: -4}}/>')).toEqual([
+    {axis: 'vertical', kind: 'margin', amount: {form: 'pixels', pixels: 8}, source: 'marginTop'},
+    {axis: 'vertical', kind: 'gap', amount: {form: 'pixels', pixels: -4}, source: 'rowGap'},
+  ])
+  expect(scanValues(`<div style={{padding: '12px', columnGap: '0.5rem'}}/>`)).toEqual([
+    {axis: 'both', kind: 'padding', amount: {form: 'pixels', pixels: 12}, source: 'padding'},
+    {axis: 'horizontal', kind: 'gap', amount: {form: 'pixels', pixels: 8}, source: 'columnGap'},
+  ])
+  expect(scanValues('<div style={{marginRight: y}}/>')).toEqual([
+    {axis: 'horizontal', kind: 'margin', amount: {form: 'named', name: 'y'}, source: 'marginRight'},
+  ])
+  expect(scanValues('<div style={{marginRight: y * 2}}/>')).toEqual([
+    {axis: 'horizontal', kind: 'margin', amount: {form: 'computed'}, source: 'marginRight'},
+  ])
+  expect(scanValues(`<div style={{marginLeft: 'auto', top: y}}/>`)).toEqual([])
+})
+
+test('offsets and non-spacing classes stay out of the distribution', () => {
+  expect(scanValues('<div className="absolute top-2 w-4 text-sm" style={{left: y}}/>')).toEqual([])
+})
+
+test('rare values past the cap print on their own line with locations', () => {
+  const divs = Array.from({length: 14}, (_, index) => `<div className="mb-[${101 + index}px]"/>`).join('\n    ')
+  const source = `export function Fixture() {\n  return <main>\n    ${divs}\n  </main>\n}\n`
+  const report = formatSpacingReport([{file: 'fixture.tsx', scan: scanSpacingSource('fixture.tsx', source)}], false)
+  expect(report).toContain('101px ×1 (fixture.tsx:3:5)')
+  expect(report).toContain('    rare: 113px (fixture.tsx:15:5) · 114px (fixture.tsx:16:5)')
+})
+
+test('the report renders the distribution grouped by axis and kind', () => {
+  const source = [
+    'export function Fixture(gap: number) {',
+    '  return <main>',
+    '    <div className="mb-2"/>',
+    '    <div className="mb-2"/>',
+    '    <div className="mb-2"/>',
+    '    <div className="mb-2.5"/>',
+    '    <div style={{rowGap: gap}}/>',
+    '  </main>',
+    '}',
+  ].join('\n')
+  const report = formatSpacingReport([{file: 'fixture.tsx', scan: scanSpacingSource('fixture.tsx', source)}], false)
+  expect(report).toContain('spacing values (Tailwind scale at 4px a step; named values are computed in TS):')
+  expect(report).toContain('  vertical margin: 8px ×3 · 10px ×1 (fixture.tsx:6:5)')
+  expect(report).toContain('  vertical gap: gap ×1 (fixture.tsx:7:5)')
 })
 
 // CLI coverage: the spacing command reads the file list from the resolved tsconfig

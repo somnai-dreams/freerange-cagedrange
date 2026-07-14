@@ -62,11 +62,45 @@ export type UnscannableCause =
   // The style position value is computed, so the positioning rule cannot run.
   | 'computedPosition'
 
+// One spacing amount the project uses — a margin, padding, or gap from a class utility
+// or a literal inline style property. The report aggregates these across the project
+// into a distribution, so the odd value (a 13px margin in a 4px-grid codebase, one
+// mb-2.5 among mb-2s) stands out with its location. Position offsets are coordinates,
+// not rhythm, and stay out of the distribution.
+export type SpacingValueKind = 'margin' | 'padding' | 'gap'
+
+export type SpacingAmount =
+  // An amount on the pixel scale: Tailwind numeric utilities at 4px a step (mb-2.5 is
+  // 10), the px keyword, and arbitrary px or rem values ([13px]; rem at 16px a rem).
+  // Inline style numbers are px, matching React's styling rule.
+  | {form: 'pixels'; pixels: number}
+  // An inline style value that is a name, e.g. marginRight: PILL_SPACING. The value is
+  // not knowable statically, but the name is its own context in the distribution.
+  | {form: 'named'; name: string}
+  // A class value off the pixel scale (gap-[10%], m-[var(--gutter)]), kept as written.
+  | {form: 'keyword'; text: string}
+  // An inline style value that is a larger expression.
+  | {form: 'computed'}
+
+export type SpacingValueSite = {
+  // 1-based, pointing at the element's opening tag.
+  line: number
+  column: number
+  axis: SpacingAxis | 'both'
+  kind: SpacingValueKind
+  amount: SpacingAmount
+  // The class token or style property as written, for display.
+  source: string
+}
+
 export type SpacingFileScan = {
   // Intrinsic elements whose inline style claims at least one spacing axis — the
   // denominator the summary line reports.
   inlineSpacedElements: number
   findings: SpacingFinding[]
+  // Every margin, padding, and gap amount on the file's intrinsic elements, whether or
+  // not the element participates in any ownership finding.
+  values: SpacingValueSite[]
 }
 
 // A scanned file paired with the path its finding lines should print.
@@ -83,6 +117,7 @@ export function scanSpacingSource(file: string, source: string): SpacingFileScan
 
 export function scanSpacing(sourceFile: ts.SourceFile): SpacingFileScan {
   const findings: SpacingFinding[] = []
+  const values: SpacingValueSite[] = []
   let inlineSpacedElements = 0
 
   const visit = (node: ts.Node): void => {
@@ -94,13 +129,14 @@ export function scanSpacing(sourceFile: ts.SourceFile): SpacingFileScan {
         inlineSpacedElements++
         findings.push(...elementFindings)
       }
+      values.push(...collectElementValues(node, sourceFile))
     }
     ts.forEachChild(node, visit)
   }
   visit(sourceFile)
 
   findings.sort((left, right) => left.line - right.line || left.column - right.column)
-  return {inlineSpacedElements, findings}
+  return {inlineSpacedElements, findings, values}
 }
 
 function isIntrinsicTagName(tagName: string): boolean {
@@ -257,11 +293,17 @@ function positionStatusFromClasses(tokens: ClassToken[]): PositionStatus {
   return status
 }
 
-function scanStyleAttribute(attribute: ts.JsxAttribute): StyleScan | null {
+function styleObjectLiteral(attribute: ts.JsxAttribute): ts.ObjectLiteralExpression | null {
   const initializer = attribute.initializer
   if (initializer == null || !ts.isJsxExpression(initializer)) return null
   const expression = initializer.expression
   if (expression == null || !ts.isObjectLiteralExpression(expression)) return null
+  return expression
+}
+
+function scanStyleAttribute(attribute: ts.JsxAttribute): StyleScan | null {
+  const expression = styleObjectLiteral(attribute)
+  if (expression == null) return null
 
   const scan: StyleScan = {owned: [], positioned: null, hasOpaqueMember: false}
   for (const member of expression.properties) {
@@ -369,6 +411,172 @@ function classAttributeTokens(attribute: ts.JsxAttribute): string[] | 'computed'
 
 function splitClassTokens(text: string): string[] {
   return text.split(/\s+/).filter(token => token !== '')
+}
+
+// The distribution collects every margin, padding, and gap amount on the element —
+// classes and literal inline styles alike — independent of the ownership rules. Variant
+// prefixes are kept: a `md:mt-4` or `before:gap-2` amount is part of the design's
+// spacing vocabulary even though it applies conditionally or to another box.
+function collectElementValues(
+  element: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+  sourceFile: ts.SourceFile,
+): SpacingValueSite[] {
+  const {line, character} = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile))
+  const location = {line: line + 1, column: character + 1}
+  const values: SpacingValueSite[] = []
+
+  for (const attribute of element.attributes.properties) {
+    if (ts.isJsxSpreadAttribute(attribute) || !ts.isIdentifier(attribute.name)) continue
+    const name = attribute.name.text
+    if (name === 'className' || name === 'class') {
+      const tokens = classAttributeTokens(attribute)
+      if (tokens === 'computed') continue
+      for (const token of tokens) {
+        const value = classValueToken(token)
+        if (value != null) values.push({...location, ...value, source: token})
+      }
+    } else if (name === 'style') {
+      const expression = styleObjectLiteral(attribute)
+      if (expression == null) continue
+      for (const member of expression.properties) {
+        if (!ts.isPropertyAssignment(member) && !ts.isShorthandPropertyAssignment(member)) continue
+        if (!ts.isIdentifier(member.name) && !ts.isStringLiteral(member.name)) continue
+        const property = inlineValueProperty(member.name.text)
+        if (property == null) continue
+        const amount = ts.isPropertyAssignment(member)
+          ? inlineAmount(member.initializer, sourceFile)
+          : {form: 'named' as const, name: member.name.text}
+        if (amount == null) continue
+        values.push({...location, ...property, amount, source: member.name.text})
+      }
+    }
+  }
+  return values
+}
+
+// A margin, padding, or gap utility with its amount; null for everything else,
+// including auto margins (alignment, not an amount).
+function classValueToken(rawToken: string): {axis: SpacingAxis | 'both'; kind: SpacingValueKind; amount: SpacingAmount} | null {
+  let utility = splitVariants(rawToken).utility
+  if (utility.startsWith('!')) utility = utility.slice(1)
+  if (utility.endsWith('!')) utility = utility.slice(0, -1)
+  let negative = false
+  if (utility.startsWith('-')) {
+    negative = true
+    utility = utility.slice(1)
+  }
+
+  const parsed = parseSpacingUtility(utility)
+  if (parsed == null) return null
+  return {axis: parsed.axis, kind: parsed.kind, amount: classAmount(parsed.value, negative)}
+}
+
+function parseSpacingUtility(utility: string): {axis: SpacingAxis | 'both'; kind: SpacingValueKind; value: string} | null {
+  if (hasUtilityRoot(utility, 'gap-x')) return {axis: 'horizontal', kind: 'gap', value: utility.slice(6)}
+  if (hasUtilityRoot(utility, 'gap-y')) return {axis: 'vertical', kind: 'gap', value: utility.slice(6)}
+  if (hasUtilityRoot(utility, 'space-x')) return {axis: 'horizontal', kind: 'gap', value: utility.slice(8)}
+  if (hasUtilityRoot(utility, 'space-y')) return {axis: 'vertical', kind: 'gap', value: utility.slice(8)}
+  const root = utilityRoot(utility)
+  if (root == null) return null
+  const value = utilityValue(utility)
+  if (value == null) return null
+  switch (root) {
+    case 'gap': return {axis: 'both', kind: 'gap', value}
+    case 'p': return {axis: 'both', kind: 'padding', value}
+    case 'pt':
+    case 'pb':
+    case 'py': return {axis: 'vertical', kind: 'padding', value}
+    case 'pl':
+    case 'pr':
+    case 'px':
+    case 'ps':
+    case 'pe': return {axis: 'horizontal', kind: 'padding', value}
+    default: {
+      const marginAxis = marginUtilityAxis(utility)
+      if (marginAxis == null) return null
+      return {axis: marginAxis, kind: 'margin', value}
+    }
+  }
+}
+
+// Tailwind's default scale is 4px a step (0.25rem), so mt-2.5 is 10px; `px` is one
+// pixel; arbitrary values parse when written in px or rem (at 16px a rem). Everything
+// else — fractions, full, var() — is kept as written.
+function classAmount(value: string, negative: boolean): SpacingAmount {
+  const sign = negative ? -1 : 1
+  if (/^\d+(\.\d+)?$/.test(value)) return {form: 'pixels', pixels: sign * Number(value) * 4}
+  if (value === 'px') return {form: 'pixels', pixels: sign}
+  if (value.startsWith('[') && value.endsWith(']')) {
+    const content = value.slice(1, -1)
+    const pxMatch = /^(-?\d+(\.\d+)?)px$/.exec(content)
+    if (pxMatch != null) return {form: 'pixels', pixels: sign * Number(pxMatch[1])}
+    const remMatch = /^(-?\d+(\.\d+)?)rem$/.exec(content)
+    if (remMatch != null) return {form: 'pixels', pixels: sign * Number(remMatch[1]) * 16}
+    return {form: 'keyword', text: content}
+  }
+  return {form: 'keyword', text: value}
+}
+
+function inlineValueProperty(name: string): {axis: SpacingAxis | 'both'; kind: SpacingValueKind} | null {
+  switch (name) {
+    case 'marginTop':
+    case 'marginBottom':
+    case 'marginBlock':
+    case 'marginBlockStart':
+    case 'marginBlockEnd':
+      return {axis: 'vertical', kind: 'margin'}
+    case 'marginLeft':
+    case 'marginRight':
+    case 'marginInline':
+    case 'marginInlineStart':
+    case 'marginInlineEnd':
+      return {axis: 'horizontal', kind: 'margin'}
+    case 'margin':
+      return {axis: 'both', kind: 'margin'}
+    case 'paddingTop':
+    case 'paddingBottom':
+    case 'paddingBlock':
+    case 'paddingBlockStart':
+    case 'paddingBlockEnd':
+      return {axis: 'vertical', kind: 'padding'}
+    case 'paddingLeft':
+    case 'paddingRight':
+    case 'paddingInline':
+    case 'paddingInlineStart':
+    case 'paddingInlineEnd':
+      return {axis: 'horizontal', kind: 'padding'}
+    case 'padding':
+      return {axis: 'both', kind: 'padding'}
+    case 'gap':
+      return {axis: 'both', kind: 'gap'}
+    case 'rowGap':
+      return {axis: 'vertical', kind: 'gap'}
+    case 'columnGap':
+      return {axis: 'horizontal', kind: 'gap'}
+    default:
+      return null
+  }
+}
+
+// null drops the value entirely: an 'auto' margin is alignment, not an amount.
+function inlineAmount(value: ts.Expression, sourceFile: ts.SourceFile): SpacingAmount | null {
+  if (ts.isNumericLiteral(value)) return {form: 'pixels', pixels: Number(value.text)}
+  if (ts.isPrefixUnaryExpression(value)
+    && value.operator === ts.SyntaxKind.MinusToken
+    && ts.isNumericLiteral(value.operand)) {
+    return {form: 'pixels', pixels: -Number(value.operand.text)}
+  }
+  if (ts.isStringLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value)) {
+    if (value.text === 'auto') return null
+    const pxMatch = /^(-?\d+(\.\d+)?)px$/.exec(value.text)
+    if (pxMatch != null) return {form: 'pixels', pixels: Number(pxMatch[1])}
+    const remMatch = /^(-?\d+(\.\d+)?)rem$/.exec(value.text)
+    if (remMatch != null) return {form: 'pixels', pixels: Number(remMatch[1]) * 16}
+    return {form: 'keyword', text: value.text}
+  }
+  if (ts.isIdentifier(value)) return {form: 'named', name: value.text}
+  if (ts.isPropertyAccessExpression(value)) return {form: 'named', name: value.getText(sourceFile)}
+  return {form: 'computed'}
 }
 
 type ClassToken =
@@ -522,11 +730,102 @@ export function formatSpacingReport(scans: SpacingPathScan[], pretty: boolean): 
   }
   const findingCount = warnings + notes
   if (findingCount === 0) lines.push('No spacing findings.')
+  const distribution = formatValueDistribution(sorted)
+  if (distribution.length > 0) lines.push('', ...distribution)
   lines.push(
     '',
     `spacing: ${elements} element${elements === 1 ? '' : 's'} spaced by inline styles across ${sorted.length} scanned file${sorted.length === 1 ? '' : 's'}; ${findingCount} finding${findingCount === 1 ? '' : 's'} (${warnings} warning${warnings === 1 ? '' : 's'}, ${notes} note${notes === 1 ? '' : 's'}).`,
   )
   return lines.join('\n')
+}
+
+type ValueTally = {
+  amount: SpacingAmount
+  count: number
+  // The first two occurrences; printed for rare values, where the location is the point.
+  sites: string[]
+}
+
+// The distribution: every margin, padding, and gap amount in the project, grouped by
+// axis and kind, most common first, with locations on values seen at most twice — those
+// are the ones worth visiting. A value from a both-axes source (p-4, gap-2, inline
+// margin) counts toward both axes, because a question like "what vertical paddings
+// exist" includes them.
+function formatValueDistribution(scans: SpacingPathScan[]): string[] {
+  const groups = new Map<string, Map<string, ValueTally>>()
+  for (const {file, scan} of scans) {
+    for (const value of scan.values) {
+      const axes: SpacingAxis[] = value.axis === 'both' ? ['vertical', 'horizontal'] : [value.axis]
+      for (const axis of axes) {
+        const groupKey = `${axis} ${value.kind}`
+        let group = groups.get(groupKey)
+        if (group == null) {
+          group = new Map()
+          groups.set(groupKey, group)
+        }
+        const amountKey = formatAmount(value.amount)
+        let tally = group.get(amountKey)
+        if (tally == null) {
+          tally = {amount: value.amount, count: 0, sites: []}
+          group.set(amountKey, tally)
+        }
+        tally.count++
+        if (tally.sites.length < 2) tally.sites.push(`${file}:${value.line}:${value.column}`)
+      }
+    }
+  }
+  if (groups.size === 0) return []
+
+  const lines = ['spacing values (Tailwind scale at 4px a step; named values are computed in TS):']
+  const groupOrder = [
+    'vertical margin', 'horizontal margin',
+    'vertical padding', 'horizontal padding',
+    'vertical gap', 'horizontal gap',
+  ]
+  for (const groupKey of groupOrder) {
+    const group = groups.get(groupKey)
+    if (group == null) continue
+    const tallies = [...group.values()].sort(compareTallies)
+    const shown = tallies.slice(0, 12)
+    const parts = shown.map(tally => {
+      const site = tally.count <= 2 ? ` (${tally.sites.join(', ')})` : ''
+      return `${formatAmount(tally.amount)} ×${tally.count}${site}`
+    })
+    // The values past the cap split by what a reader wants from them: moderately common
+    // ones just get counted, while rare ones (a value used once or twice is where an
+    // inconsistency hides) print on their own line with their locations.
+    const remaining = tallies.slice(12)
+    const commonRemaining = remaining.filter(tally => tally.count > 2).length
+    lines.push(`  ${groupKey}: ${parts.join(' · ')}${commonRemaining > 0 ? ` · ${commonRemaining} more` : ''}`)
+    const rare = remaining.filter(tally => tally.count <= 2)
+    if (rare.length > 0) {
+      const shownRare = rare.slice(0, 8)
+      const rareParts = shownRare.map(tally =>
+        `${formatAmount(tally.amount)}${tally.count === 2 ? ' ×2' : ''} (${tally.sites[0]!})`)
+      const moreRare = rare.length - shownRare.length
+      lines.push(`    rare: ${rareParts.join(' · ')}${moreRare > 0 ? ` · +${moreRare} more` : ''}`)
+    }
+  }
+  return lines
+}
+
+// Most common first; equal counts order by pixel size, then text, so scale neighbors
+// sit next to each other.
+function compareTallies(left: ValueTally, right: ValueTally): number {
+  if (left.count !== right.count) return right.count - left.count
+  const leftPixels = left.amount.form === 'pixels' ? left.amount.pixels : Infinity
+  const rightPixels = right.amount.form === 'pixels' ? right.amount.pixels : Infinity
+  if (leftPixels !== rightPixels) return leftPixels - rightPixels
+  return formatAmount(left.amount).localeCompare(formatAmount(right.amount))
+}
+
+function formatAmount(amount: SpacingAmount): string {
+  switch (amount.form) {
+    case 'pixels': return `${amount.pixels}px`
+    case 'named': return amount.name
+    case 'keyword': return `'${amount.text}'`
+    case 'computed': return '(computed)'
+  }
 }
 
 function formatSpacingFinding(file: string, finding: SpacingFinding, pretty: boolean): string {
