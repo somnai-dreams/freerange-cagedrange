@@ -104,6 +104,9 @@ function coverageReason(reason: SpacingCoverageReason): string {
     case 'computedClassName': return 'className is computed and has no statically visible spacing utility'
     case 'partialClassName': return 'className is partly computed; visible spacing utilities were checked'
     case 'computedPosition': return 'the inline position value is computed'
+    case 'computedOffsetPresence': return 'whether the inline offset has a value is computed'
+    case 'uncorrelatedPositionAndOffset':
+      return 'the conditional position and inline offset could not be correlated'
   }
 }
 

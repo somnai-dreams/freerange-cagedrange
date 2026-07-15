@@ -14,6 +14,7 @@ import type {
   SpacingOwnershipFinding,
   SpacingValue,
 } from './model.ts'
+import {guardRelationship, isAlways, unknownRuntimeCases} from './runtime-condition.ts'
 
 export function auditSpacingSource(file: string, source: string): SpacingFileAudit {
   return auditSpacingFile(ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, false))
@@ -35,8 +36,8 @@ function auditElement(element: LoweredSpacingElement): SpacingElementAudit {
   return {
     line: element.line,
     column: element.column,
-    coverage: elementCoverage(element, classDeclarations),
-    ownership,
+    coverage: elementCoverage(element, classDeclarations, ownership.coverageReasons),
+    ownership: ownership.findings,
     values,
     hasVisibleInlineOwnership,
   }
@@ -52,6 +53,7 @@ function classFactDeclaration(classFact: ClassFact): SpacingDeclaration[] {
         source: {kind: 'class', token: classFact.token},
         target: classFact.target,
         condition: classFact.condition,
+        presence: unknownRuntimeCases(),
       }]
     case 'margin':
     case 'padding':
@@ -70,24 +72,33 @@ function classFactDeclaration(classFact: ClassFact): SpacingDeclaration[] {
 function ownershipFindings(
   element: LoweredSpacingElement,
   classDeclarations: SpacingDeclaration[],
-): SpacingOwnershipFinding[] {
+): {findings: SpacingOwnershipFinding[]; coverageReasons: SpacingCoverageReason[]} {
   const findings: SpacingOwnershipFinding[] = []
+  const coverageReasons: SpacingCoverageReason[] = []
   const inlineOwned = element.inlineDeclarations.filter(declaration =>
     declaration.kind === 'offset' || declaration.kind === 'margin')
   const inlineOffsets = inlineOwned.filter(declaration => declaration.kind === 'offset')
 
-  if (inlineOffsets.length > 0 && offsetIsProvenUnpositioned(element)) {
+  let noPositionFinding: SpacingOwnershipFinding | null = null
+  for (const inlineOffset of inlineOffsets) {
+    const result = offsetPositionResult(element, inlineOffset)
+    if (result === 'ambiguous') {
+      coverageReasons.push({kind: 'uncorrelatedPositionAndOffset'})
+      continue
+    }
+    if (result !== 'finding' || noPositionFinding != null) continue
     const staticClass = element.classes.possibleClasses.find(classFact =>
       classFact.kind === 'position'
       && classFact.status === 'none'
       && classFact.target === 'self'
       && classFact.condition === 'always')
-    findings.push({
+    noPositionFinding = {
       kind: 'offsetWithoutPosition',
-      styleProperty: inlineProperty(inlineOffsets[0]!),
+      styleProperty: inlineProperty(inlineOffset),
       positionClass: staticClass?.kind === 'position' ? staticClass.token : null,
-    })
+    }
   }
+  if (noPositionFinding != null) findings.push(noPositionFinding)
 
   for (const classDeclaration of classDeclarations) {
     if (classDeclaration.target !== 'self') continue
@@ -115,19 +126,46 @@ function ownershipFindings(
       break
     }
   }
-  return findings
+  return {findings, coverageReasons}
 }
 
-function offsetIsProvenUnpositioned(element: LoweredSpacingElement): boolean {
-  if (!element.stylePositionComplete) return false
+type OffsetPositionResult = 'clean' | 'finding' | 'ambiguous'
+
+function offsetPositionResult(
+  element: LoweredSpacingElement,
+  inlineOffset: SpacingDeclaration,
+): OffsetPositionResult {
+  if (inlineOffset.kind !== 'offset') throw new Error('Expected an inline offset declaration')
+  if (inlineOffset.presence.kind === 'unknown' || !element.stylePositionComplete) return 'clean'
+  if (inlineOffset.presence.alternatives.length === 0) return 'clean'
   switch (element.inlinePosition) {
     case 'outOfFlow':
-    case 'positionedInFlow': return false
-    case 'none': return true
-    case 'computed': return false
-    case null:
-      return element.classes.coverage === 'complete' && !hasPositionOnEveryOutcome(element.classes)
+    case 'positionedInFlow': return 'clean'
+    case 'none': return 'finding'
+    case 'computed': return 'clean'
+    case null: break
   }
+  if (element.classes.coverage === 'partial') return 'clean'
+  if (element.classPositionCases.kind === 'known') {
+    let unknownRelationship = false
+    for (const presenceGuard of inlineOffset.presence.alternatives) {
+      for (const positionCase of element.classPositionCases.cases) {
+        if (positionCase.positioned) continue
+        switch (guardRelationship(presenceGuard, positionCase.guard)) {
+          case 'overlap': return 'finding'
+          case 'unknown': unknownRelationship = true; break
+          case 'disjoint': break
+        }
+      }
+    }
+    return unknownRelationship ? 'ambiguous' : 'clean'
+  }
+  if (hasPositionOnEveryOutcome(element.classes)) return 'clean'
+  const hasPositionOnAnyOutcome = element.classes.outcomes.some(outcome =>
+    outcome.kind === 'truthy'
+    && (outcome.position === 'positioned' || outcome.position === 'positionedThenStatic'))
+  if (!hasPositionOnAnyOutcome || isAlways(inlineOffset.presence)) return 'finding'
+  return 'ambiguous'
 }
 
 function spacingValues(
@@ -152,8 +190,9 @@ function spacingValues(
 function elementCoverage(
   element: LoweredSpacingElement,
   classDeclarations: SpacingDeclaration[],
+  ownershipReasons: SpacingCoverageReason[],
 ): SpacingElementCoverage {
-  const reasons = uniqueReasons(element.coverageReasons)
+  const reasons = uniqueReasons([...element.coverageReasons, ...ownershipReasons])
   if (reasons.length === 0) return {kind: 'complete'}
   const hasUsefulFact = element.inlineDeclarations.length > 0
     || classDeclarations.length > 0

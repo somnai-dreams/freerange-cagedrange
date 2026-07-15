@@ -17,6 +17,37 @@ export type PositionStatus = 'outOfFlow' | 'positionedInFlow' | 'none'
 // states keep the two facts correlated, so impossible combinations cannot be built.
 export type PositionTrace = 'none' | 'static' | 'positioned' | 'positionedThenStatic'
 
+export type StableReference = {
+  root: string
+  properties: string[]
+}
+
+export type GuardValue =
+  | {kind: 'string'; value: string}
+  | {kind: 'number'; value: number}
+  | {kind: 'boolean'; value: boolean}
+  | {kind: 'null'}
+
+export type GuardPredicate =
+  | {kind: 'truthy'; reference: StableReference}
+  | {kind: 'equals'; reference: StableReference; value: GuardValue}
+  | {kind: 'defined'; reference: StableReference}
+
+export type GuardTerm = {
+  predicate: GuardPredicate
+  expected: boolean
+}
+
+export type RuntimeGuard = GuardTerm[]
+
+export type RuntimeCases =
+  | {kind: 'known'; alternatives: RuntimeGuard[]}
+  | {kind: 'unknown'}
+
+export type ClassPositionCases =
+  | {kind: 'known'; cases: {guard: RuntimeGuard; positioned: boolean}[]}
+  | {kind: 'unknown'}
+
 export type ClassOutcome =
   | {kind: 'nullish'}
   | {kind: 'falsy'}
@@ -75,6 +106,7 @@ export type SpacingDeclaration =
       source: DeclarationSource
       target: DeclarationTarget
       condition: DeclarationCondition
+      presence: RuntimeCases
     }
   | {
       kind: 'margin' | 'padding' | 'gap'
@@ -92,6 +124,8 @@ export type SpacingCoverageReason =
   | {kind: 'computedClassName'}
   | {kind: 'partialClassName'}
   | {kind: 'computedPosition'}
+  | {kind: 'computedOffsetPresence'}
+  | {kind: 'uncorrelatedPositionAndOffset'}
 
 export type SpacingElementCoverage =
   | {kind: 'complete'}
@@ -140,6 +174,7 @@ export type LoweredSpacingElement = {
   line: number
   column: number
   classes: ClassSummary
+  classPositionCases: ClassPositionCases
   inlineDeclarations: SpacingDeclaration[]
   inlinePosition: PositionStatus | 'computed' | null
   stylePositionComplete: boolean

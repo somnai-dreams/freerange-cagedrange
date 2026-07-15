@@ -1,5 +1,14 @@
 import * as ts from 'typescript'
-import type {ClassFact, ClassOutcome, ClassSummary, PositionTrace} from './model.ts'
+import type {
+  ClassFact,
+  ClassOutcome,
+  ClassPositionCases,
+  ClassSummary,
+  PositionTrace,
+  RuntimeCases,
+  RuntimeGuard,
+} from './model.ts'
+import {combineGuards, conditionCases} from './runtime-condition.ts'
 import {parseTailwindClass} from './tailwind.ts'
 
 const outcomeOrder: ClassOutcome[] = [
@@ -21,6 +30,14 @@ export function classAttributeSummary(attribute: ts.JsxAttribute): ClassSummary 
   return extractClassExpression(initializer.expression)
 }
 
+export function classAttributePositionCases(attribute: ts.JsxAttribute): ClassPositionCases {
+  const initializer = attribute.initializer
+  if (initializer == null) return positionCasesFromSummary(emptyClassSummary())
+  if (ts.isStringLiteral(initializer)) return positionCasesFromSummary(literalClassSummary(initializer.text))
+  if (!ts.isJsxExpression(initializer) || initializer.expression == null) return {kind: 'unknown'}
+  return positionCasesForExpression(initializer.expression)
+}
+
 export function emptyClassSummary(): ClassSummary {
   return normalizeSummary([], 'complete', [{kind: 'falsy'}])
 }
@@ -33,6 +50,114 @@ export function hasPositionOnEveryOutcome(summary: ClassSummary): boolean {
   return summary.outcomes.every(outcome =>
     outcome.kind === 'truthy'
     && (outcome.position === 'positioned' || outcome.position === 'positionedThenStatic'))
+}
+
+function positionCasesForExpression(expression: ts.Expression): ClassPositionCases {
+  if (ts.isParenthesizedExpression(expression)) return positionCasesForExpression(expression.expression)
+  if (ts.isTemplateExpression(expression)) {
+    const templateCases = positionCasesForTemplate(expression)
+    return templateCases.kind === 'unknown'
+      ? positionCasesFromSummary(extractClassExpression(expression))
+      : templateCases
+  }
+  if (ts.isConditionalExpression(expression)) {
+    const condition = staticTruthiness(expression.condition)
+    if (condition === 'truthy') return positionCasesForExpression(expression.whenTrue)
+    if (condition === 'falsy') return positionCasesForExpression(expression.whenFalse)
+    const merged = mergePositionCases(
+      gatePositionCases(positionCasesForExpression(expression.whenTrue), conditionCases(expression.condition, true)),
+      gatePositionCases(positionCasesForExpression(expression.whenFalse), conditionCases(expression.condition, false)),
+    )
+    return merged.kind === 'unknown'
+      ? positionCasesFromSummary(extractClassExpression(expression))
+      : merged
+  }
+  if (ts.isBinaryExpression(expression)
+    && expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+    const condition = staticTruthiness(expression.left)
+    if (condition === 'truthy') return positionCasesForExpression(expression.right)
+    if (condition === 'falsy') return positionCasesFromSummary(falseishExpressionSummary(expression.left))
+    const merged = mergePositionCases(
+      gatePositionCases(positionCasesForExpression(expression.right), conditionCases(expression.left, true)),
+      gatePositionCases(
+        positionCasesFromSummary(falseishExpressionSummary(expression.left)),
+        conditionCases(expression.left, false),
+      ),
+    )
+    return merged.kind === 'unknown'
+      ? positionCasesFromSummary(extractClassExpression(expression))
+      : merged
+  }
+  return positionCasesFromSummary(extractClassExpression(expression))
+}
+
+function positionCasesForTemplate(expression: ts.TemplateExpression): ClassPositionCases {
+  let combined = positionCasesFromSummary(literalClassSummary(expression.head.text))
+  for (let index = 0; index < expression.templateSpans.length; index++) {
+    const span = expression.templateSpans[index]!
+    const previousText = index === 0 ? expression.head.text : expression.templateSpans[index - 1]!.literal.text
+    const leftSeparated = index === 0
+      ? previousText === '' || /\s$/.test(previousText)
+      : previousText !== '' && /\s$/.test(previousText)
+    const rightSeparated = index === expression.templateSpans.length - 1
+      ? span.literal.text === '' || /^\s/.test(span.literal.text)
+      : span.literal.text !== '' && /^\s/.test(span.literal.text)
+    if (!leftSeparated || !rightSeparated) return {kind: 'unknown'}
+    combined = joinPositionCases(combined, positionCasesForExpression(span.expression))
+    combined = joinPositionCases(combined, positionCasesFromSummary(literalClassSummary(span.literal.text)))
+    if (combined.kind === 'unknown') return combined
+  }
+  return combined
+}
+
+function positionCasesFromSummary(summary: ClassSummary): ClassPositionCases {
+  if (hasPositionOnEveryOutcome(summary)) {
+    return {kind: 'known', cases: [{guard: [], positioned: true}]}
+  }
+  if (!summary.outcomes.some(outcomeIsPositioned)) {
+    return {kind: 'known', cases: [{guard: [], positioned: false}]}
+  }
+  return {kind: 'unknown'}
+}
+
+function outcomeIsPositioned(outcome: ClassOutcome): boolean {
+  return outcome.kind === 'truthy'
+    && (outcome.position === 'positioned' || outcome.position === 'positionedThenStatic')
+}
+
+function gatePositionCases(cases: ClassPositionCases, condition: RuntimeCases): ClassPositionCases {
+  if (cases.kind === 'unknown' || condition.kind === 'unknown') return {kind: 'unknown'}
+  const gated: {guard: RuntimeGuard; positioned: boolean}[] = []
+  for (const conditionGuard of condition.alternatives) {
+    for (const positionCase of cases.cases) {
+      const guard = combineGuards(conditionGuard, positionCase.guard)
+      if (guard != null) gated.push({guard, positioned: positionCase.positioned})
+      if (gated.length > 16) return {kind: 'unknown'}
+    }
+  }
+  return {kind: 'known', cases: gated}
+}
+
+function mergePositionCases(left: ClassPositionCases, right: ClassPositionCases): ClassPositionCases {
+  if (left.kind === 'unknown' || right.kind === 'unknown') return {kind: 'unknown'}
+  return left.cases.length + right.cases.length > 16
+    ? {kind: 'unknown'}
+    : {kind: 'known', cases: [...left.cases, ...right.cases]}
+}
+
+function joinPositionCases(left: ClassPositionCases, right: ClassPositionCases): ClassPositionCases {
+  if (left.kind === 'unknown' || right.kind === 'unknown') return {kind: 'unknown'}
+  const cases: {guard: RuntimeGuard; positioned: boolean}[] = []
+  for (const leftCase of left.cases) {
+    for (const rightCase of right.cases) {
+      const guard = combineGuards(leftCase.guard, rightCase.guard)
+      if (guard != null) {
+        cases.push({guard, positioned: leftCase.positioned || rightCase.positioned})
+      }
+      if (cases.length > 16) return {kind: 'unknown'}
+    }
+  }
+  return {kind: 'known', cases}
 }
 
 function unknownClassSummary(): ClassSummary {

@@ -25,6 +25,14 @@ function scanElements(elements: string): {
   limitedCoverage: SpacingElementCoverage[]
 } {
   const source = `export function Fixture(y: number, x: number) {\n  return <main>${elements}</main>\n}\n`
+  return scanSource(source)
+}
+
+function scanSource(source: string): {
+  inlineSpacedElements: number
+  details: SpacingOwnershipFinding[]
+  limitedCoverage: SpacingElementCoverage[]
+} {
   const audit = auditSpacingSource('fixture.tsx', source)
   return {
     inlineSpacedElements: audit.elements.filter(element => element.hasVisibleInlineOwnership).length,
@@ -96,6 +104,212 @@ test('every computed className branch must position the element', () => {
   expect(scanElements(`<div className={(open ? 'absolute' : '') || 'relative'} style={{top: y}}/>`).details).toEqual([])
 })
 
+test('conditional inline offsets are correlated with simple position branches', () => {
+  const positionedBranch = scanSource(
+    `export function Fixture(open: boolean, y: number) {
+      return <div className={open ? 'absolute' : ''} style={{top: open ? y : undefined}}/>
+    }`,
+  )
+  expect(positionedBranch.details).toEqual([])
+  expect(positionedBranch.limitedCoverage).toEqual([])
+
+  const unpositionedBranch = scanSource(
+    `export function Fixture(open: boolean, y: number) {
+      return <div className={open ? 'absolute' : ''} style={{top: open ? undefined : y}}/>
+    }`,
+  )
+  expect(unpositionedBranch.details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
+  ])
+  expect(unpositionedBranch.limitedCoverage).toEqual([])
+
+  const unrelatedConditions = scanSource(
+    `export function Fixture(open: boolean, moved: boolean, y: number) {
+      return <div className={open ? 'absolute' : ''} style={{top: moved ? y : undefined}}/>
+    }`,
+  )
+  expect(unrelatedConditions.details).toEqual([])
+  expect(unrelatedConditions.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'uncorrelatedPositionAndOffset'}]},
+  ])
+
+  const exclusiveLiteralValues = scanSource(
+    `export function Fixture(mode: string, y: number) {
+      return <div className={mode === 'idle' ? '' : 'absolute'} style={{top: mode === 'offset' ? y : undefined}}/>
+    }`,
+  )
+  expect(exclusiveLiteralValues.details).toEqual([])
+  expect(exclusiveLiteralValues.limitedCoverage).toEqual([])
+})
+
+test('conditional offsets still report when positioning is unconditionally absent', () => {
+  const unpositioned = scanElements(`<div style={{top: open ? y : undefined}}/>`)
+  expect(unpositioned.details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
+  ])
+  expect(unpositioned.limitedCoverage).toEqual([])
+
+  const positioned = scanElements(`<div className="absolute" style={{top: open ? y : undefined}}/>`)
+  expect(positioned.details).toEqual([])
+  expect(positioned.limitedCoverage).toEqual([])
+})
+
+test('a definitely absent inline offset does not create visible ownership', () => {
+  const result = scanElements(`<div style={{top: undefined}}/>`)
+  expect(result.inlineSpacedElements).toBe(0)
+  expect(result.details).toEqual([])
+  expect(result.limitedCoverage).toEqual([])
+
+  const voidResult = scanElements(`<div style={{top: void 0}}/>`)
+  expect(voidResult.inlineSpacedElements).toBe(0)
+  expect(voidResult.details).toEqual([])
+  expect(voidResult.limitedCoverage).toEqual([])
+})
+
+test('a shadowed undefined identifier does not masquerade as the global value', () => {
+  const audit = auditSpacingSource(
+    'fixture.tsx',
+    `export function Fixture(undefined: number | undefined) {
+      return <div style={{top: undefined}}/>
+    }`,
+  )
+  expect(audit.elements[0]).toMatchObject({
+    coverage: {kind: 'partial', reasons: [{kind: 'computedOffsetPresence'}]},
+    ownership: [],
+    hasVisibleInlineOwnership: true,
+  })
+})
+
+test('an unsupported offset-presence condition is coverage, not a finding', () => {
+  const result = scanElements(`<div style={{top: shouldMove() ? y : undefined}}/>`)
+  expect(result.details).toEqual([])
+  expect(result.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'computedOffsetPresence'}]},
+  ])
+
+  const alwaysPresent = scanElements(`<div style={{top: shouldMove() ? y : fallback}}/>`)
+  expect(alwaysPresent.details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
+  ])
+  expect(alwaysPresent.limitedCoverage).toEqual([])
+
+  const alwaysAbsent = scanElements(`<div style={{top: shouldMove() ? null : undefined}}/>`)
+  expect(alwaysAbsent.inlineSpacedElements).toBe(0)
+  expect(alwaysAbsent.details).toEqual([])
+  expect(alwaysAbsent.limitedCoverage).toEqual([])
+})
+
+test('mutable and property guards cannot prove correlation across JSX attributes', () => {
+  const mutable = scanSource(`export function Fixture(open: boolean, y: number) {
+    return <div
+      className={open ? 'absolute' : ''}
+      data-state={(open = true)}
+      style={{top: open ? y : undefined}}
+    />
+  }`)
+  expect(mutable.details).toEqual([])
+  expect(mutable.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'uncorrelatedPositionAndOffset'}]},
+  ])
+
+  const property = scanSource(`export function Fixture(state: {open: boolean}, y: number) {
+    return <div className={state.open ? 'absolute' : ''} style={{top: state.open ? y : undefined}}/>
+  }`)
+  expect(property.details).toEqual([])
+  expect(property.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'uncorrelatedPositionAndOffset'}]},
+  ])
+
+  const imported = scanSource(`import {open, toggle} from './state'
+  function Other(open: boolean) { return open }
+  export const fixture = <div
+    className={open ? 'absolute' : ''}
+    data-state={toggle()}
+    style={{top: open ? undefined : 8}}
+  />`)
+  expect(imported.details).toEqual([])
+  expect(imported.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'uncorrelatedPositionAndOffset'}]},
+  ])
+
+  const loopWrite = scanSource(`export function Fixture(open: boolean, values: boolean[]) {
+    const toggle = () => {
+      for (open of values) break
+    }
+    return <div
+      className={open ? 'absolute' : ''}
+      data-state={toggle()}
+      style={{top: open ? undefined : 8}}
+    />
+  }`)
+  expect(loopWrite.details).toEqual([])
+  expect(loopWrite.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'uncorrelatedPositionAndOffset'}]},
+  ])
+
+  const dynamicWrite = scanSource(`export function Fixture(open: boolean, y: number) {
+    return <div
+      className={open ? 'absolute' : ''}
+      data-state={eval('open = true')}
+      style={{top: open ? y : undefined}}
+    />
+  }`)
+  expect(dynamicWrite.details).toEqual([])
+  expect(dynamicWrite.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'uncorrelatedPositionAndOffset'}]},
+  ])
+})
+
+test('a later explicit style key replaces the earlier declaration', () => {
+  const result = scanSource(`export function Fixture(y: number) {
+    return <div
+      style={{top: shouldMove() ? y : undefined, top: undefined}}
+    />
+  }`)
+  expect(result.inlineSpacedElements).toBe(0)
+  expect(result.details).toEqual([])
+  expect(result.limitedCoverage).toEqual([])
+
+  const position = scanSource(`export function Fixture(y: number) {
+    return <div style={{position: getPosition(), position: 'absolute', top: y}}/>
+  }`)
+  expect(position.details).toEqual([])
+  expect(position.limitedCoverage).toEqual([])
+})
+
+test('MJ Gallery conditional offset patterns are proven or reported as ambiguous', () => {
+  const correlated = scanSource(`export function Fixture(type: string, frameHasSidebar: boolean, x: number) {
+    return <div
+    className={\`\${type === 'style-creator' ? 'shrink-0' : 'absolute'} rounded-xl flex\`}
+    style={{left: type !== 'style-creator' && frameHasSidebar ? x : undefined}}
+    />
+  }`)
+  expect(correlated.details).toEqual([])
+  expect(correlated.limitedCoverage).toEqual([])
+
+  const correlatedFailure = scanSource(`export function Fixture(type: string, frameHasSidebar: boolean, x: number) {
+    return <div
+    className={\`\${type === 'style-creator' ? 'absolute' : 'shrink-0'} rounded-xl flex\`}
+    style={{left: type !== 'style-creator' && frameHasSidebar ? x : undefined}}
+    />
+  }`)
+  expect(correlatedFailure.details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'left', positionClass: null},
+  ])
+  expect(correlatedFailure.limitedCoverage).toEqual([])
+
+  const upstreamCorrelation = scanSource(`export function Fixture(type: string, inputFieldLeft: number | undefined) {
+    return <div
+    className={type === 'style-creator' ? 'shrink-0' : 'absolute'}
+    style={{left: inputFieldLeft ?? undefined}}
+    />
+  }`)
+  expect(upstreamCorrelation.details).toEqual([])
+  expect(upstreamCorrelation.limitedCoverage).toEqual([
+    {kind: 'partial', reasons: [{kind: 'uncorrelatedPositionAndOffset'}]},
+  ])
+})
+
 test('twMerge positioning follows the last possible position utility', () => {
   expect(scanElements(`<div className={twMerge('absolute', open && 'static')} style={{top: y}}/>`).details).toEqual([
     {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: 'static'},
@@ -152,6 +366,12 @@ test('shorthand, negative, important, and variant-prefixed margins still match',
 
 test('an offset class competing with the same inline offset property is a finding', () => {
   expect(scanElements('<div className="absolute top-0" style={{top: y}}/>').details).toEqual([
+    {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'top-0'},
+  ])
+})
+
+test('a conditional inline offset still participates in a proven class conflict', () => {
+  expect(scanElements(`<div className="absolute top-0" style={{top: open ? y : undefined}}/>`).details).toEqual([
     {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'top-0'},
   ])
 })
@@ -550,6 +770,23 @@ test('coverage limits are reported separately and do not inflate the finding cou
   expect(report).toContain('coverage limits:')
   expect(report).not.toContain('[spacing-unscannable]')
   expect(report).toContain('spacing ownership: 1 element with a visible inline margin or offset; 1 finding.')
+  expect(report).toContain('coverage: 0/1 intrinsic element fully scanned; 1 partial; 0 unsupported')
+})
+
+test('uncorrelated position and offset conditions print as coverage, not findings', () => {
+  const audit = auditSpacingSource(
+    'fixture.tsx',
+    `export const fixture = <div
+      className={open ? 'absolute' : ''}
+      style={{top: moved ? 8 : undefined}}
+    />`,
+  )
+  const report = formatSpacingReport([audit], reportOptions)
+  expect(report).toContain('No spacing ownership findings.')
+  expect(report).toContain(
+    'partial — the conditional position and inline offset could not be correlated',
+  )
+  expect(report).toContain('spacing ownership: 1 element with a visible inline margin or offset; 0 findings.')
   expect(report).toContain('coverage: 0/1 intrinsic element fully scanned; 1 partial; 0 unsupported')
 })
 
