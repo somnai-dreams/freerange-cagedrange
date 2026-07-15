@@ -7,6 +7,13 @@ export type LayoutMetric =
 export type LayoutTarget = {
   name: string
   selector: string
+  source?: LayoutSourceTarget
+}
+
+export type LayoutSourceTarget = {
+  kind: 'jsx'
+  file: string
+  marker: string
 }
 
 export type LayoutScenario = {
@@ -194,4 +201,51 @@ export type LayoutInference =
 
 export type LayoutSuiteAudit = {
   scenarios: LayoutScenarioAudit[]
+}
+
+export type StaticLayoutEvidence = {
+  file: string
+  line: number
+  column: number
+  description: string
+}
+
+export type StaticLayoutUnknownReason =
+  | {kind: 'typescriptProjectMissing'}
+  | {kind: 'sourceFileMissing'; file: string}
+  | {kind: 'sourceFileOutsideProject'; file: string}
+  | {kind: 'sourceMarkerMissing'; marker: string}
+  | {kind: 'sourceMarkerMatchedMultiple'; marker: string; count: number}
+  | {kind: 'unsupportedSource'; reasons: string[]}
+
+export type StaticLayoutCheck =
+  | {
+      kind: 'pass'
+      constraint: string
+      target: string
+      minimumPx: number
+      maximumPx: number
+    }
+  | {
+      kind: 'fail'
+      constraint: string
+      target: string
+      expectedPixels: number
+      tolerancePx: number
+      minimumPx: number
+      maximumPx: number | null
+      witnessMinimumPx: number
+      evidence: StaticLayoutEvidence[]
+    }
+  | {
+      kind: 'unknown'
+      constraint: string
+      target: string
+      minimumPx: number | null
+      maximumPx: number | null
+      reason: StaticLayoutUnknownReason
+    }
+
+export type StaticLayoutAudit = {
+  checks: StaticLayoutCheck[]
 }

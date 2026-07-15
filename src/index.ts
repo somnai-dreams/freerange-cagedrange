@@ -25,8 +25,10 @@ export {
   auditLayoutSnapshots,
   findChromeExecutable,
   formatLayoutReport,
+  formatStaticLayoutReport,
   parseLayoutSuite,
   runLayoutSuite,
+  runStaticLayoutSuite,
 } from './layout/index.ts'
 export type {AuditCoverage, AuditReason, AuditReference, FileAudit, RefactorGuide, RefactorGuideID} from './audit.ts'
 export type {AnalysisReport} from './report/index.ts'
@@ -60,9 +62,14 @@ export type {
   LayoutScenario,
   LayoutScenarioAudit,
   LayoutScenarioSnapshot,
+  LayoutSourceTarget,
   LayoutSuite,
   LayoutSuiteAudit,
   LayoutTarget,
   LayoutTargetObservation,
   LayoutUnknownReason,
+  StaticLayoutAudit,
+  StaticLayoutCheck,
+  StaticLayoutEvidence,
+  StaticLayoutUnknownReason,
 } from './layout/index.ts'

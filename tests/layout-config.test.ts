@@ -47,6 +47,30 @@ describe('layout suite parsing', () => {
     expect(parsed.inferAlignments.map(inference => inference.name)).toEqual(['gallery columns'])
   })
 
+  test('source targets share one stable marker with the rendered selector', () => {
+    const parsed = parseLayoutSuite({
+      ...suite,
+      targets: [{
+        ...suite.targets[0],
+        selector: '[data-fr-layout="composer"]',
+        source: {kind: 'jsx', file: 'src/Composer.tsx', marker: 'composer'},
+      }, ...suite.targets.slice(1)],
+    })
+    expect(parsed.targets[0]?.source).toEqual({
+      kind: 'jsx',
+      file: 'src/Composer.tsx',
+      marker: 'composer',
+    })
+    expect(() => parseLayoutSuite({
+      ...suite,
+      targets: [{
+        ...suite.targets[0],
+        selector: '[data-fr-layout="different"]',
+        source: {kind: 'jsx', file: 'src/Composer.tsx', marker: 'composer'},
+      }, ...suite.targets.slice(1)],
+    })).toThrow("selector must be '[data-fr-layout=\"composer\"]'")
+  })
+
   test('rejects unknown fields, malformed metrics, and invalid numbers', () => {
     expect(() => parseLayoutSuite({...suite, surprise: true})).toThrow("unknown field 'surprise'")
     expect(() => parseLayoutSuite({

@@ -4,6 +4,7 @@ import type {
   LayoutConstraint,
   LayoutMetric,
   LayoutScenario,
+  LayoutSourceTarget,
   LayoutSuite,
   LayoutTarget,
 } from './model.ts'
@@ -76,10 +77,35 @@ function parseAlignmentInference(value: unknown, path: string): LayoutAlignmentI
 
 function parseTarget(value: unknown, path: string): LayoutTarget {
   const target = record(value, path)
-  exactKeys(target, ['name', 'selector'], path)
+  exactKeys(target, ['name', 'selector', 'source'], path)
+  const source = target['source'] === undefined ? null : parseSourceTarget(target['source'], `${path}.source`)
+  const selector = nonEmptyString(target['selector'], `${path}.selector`)
+  if (source != null) {
+    const expectedSelector = `[data-fr-layout="${source.marker}"]`
+    if (selector !== expectedSelector) {
+      throw new Error(`${path}.selector must be '${expectedSelector}' when ${path}.source is set.`)
+    }
+  }
   return {
     name: nonEmptyString(target['name'], `${path}.name`),
-    selector: nonEmptyString(target['selector'], `${path}.selector`),
+    selector,
+    ...(source == null ? {} : {source}),
+  }
+}
+
+function parseSourceTarget(value: unknown, path: string): LayoutSourceTarget {
+  const source = record(value, path)
+  exactKeys(source, ['kind', 'file', 'marker'], path)
+  const kind = nonEmptyString(source['kind'], `${path}.kind`)
+  if (kind !== 'jsx') throw new Error(`${path}.kind must be 'jsx'.`)
+  const marker = nonEmptyString(source['marker'], `${path}.marker`)
+  if (!/^[A-Za-z0-9_-]+$/.test(marker)) {
+    throw new Error(`${path}.marker may contain only letters, numbers, underscores, and hyphens.`)
+  }
+  return {
+    kind,
+    file: nonEmptyString(source['file'], `${path}.file`),
+    marker,
   }
 }
 

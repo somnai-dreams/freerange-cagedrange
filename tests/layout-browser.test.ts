@@ -99,17 +99,33 @@ test.skipIf(findChromeExecutable() == null)('Chrome measures composed layout in 
 }, 30_000)
 
 test.skipIf(findChromeExecutable() == null)('fr --layout finds the project config and gates failed contracts', async () => {
+  let withButton = false
   const server = Bun.serve({
     port: 0,
     fetch() {
-      return new Response(fixture(true), {headers: {'content-type': 'text/html'}})
+      return new Response(fixture(withButton), {headers: {'content-type': 'text/html'}})
     },
   })
   const directory = mkdtempSync(join(tmpdir(), 'freerange-layout-cli-'))
   try {
+    writeFileSync(join(directory, 'tsconfig.json'), JSON.stringify({
+      compilerOptions: {jsx: 'preserve'},
+      include: ['*.tsx'],
+    }))
+    writeFileSync(join(directory, 'Composer.tsx'), `
+export const composer = <div data-fr-layout="composer" className="flex flex-col border">
+  <div className="flex" style={{paddingTop: 11, paddingBottom: 11}}>
+    <div style={{height: 30}} />
+  </div>
+</div>
+`)
     writeFileSync(join(directory, 'freerange.layout.json'), JSON.stringify({
       baseUrl: server.url.href,
-      targets: [{name: 'composer', selector: '#composer'}],
+      targets: [{
+        name: 'composer',
+        selector: '[data-fr-layout="composer"]',
+        source: {kind: 'jsx', file: 'Composer.tsx', marker: 'composer'},
+      }],
       scenarios: [{
         name: 'with-button',
         url: '/',
@@ -129,13 +145,57 @@ test.skipIf(findChromeExecutable() == null)('fr --layout finds the project confi
     const failed = await runLayoutCli(directory)
     expect(failed.exitCode).toBe(1)
     expect(failed.stderr).toBe('')
-    expect(failed.stdout).toContain('with-button: error [layout-size]')
-    expect(failed.stdout).toContain('layout contracts: 0/1 passed; 1 failed; 0 unknown')
+    expect(failed.stdout).toContain('Static layout preflight:')
+    expect(failed.stdout).toContain('computes to 54px; expected 52px ±0.25px')
+    expect(failed.stdout).toContain('Rendered layout contracts:')
+    expect(failed.stdout).toContain('with-button: all 1 constraints passed')
+
+    writeFileSync(join(directory, 'Composer.tsx'), `
+export const composer = <div data-fr-layout="composer" className="flex flex-col border">
+  <div className="flex" style={{paddingTop: 10, paddingBottom: 10}}>
+    <div style={{height: 30}} />
+  </div>
+</div>
+`)
+    withButton = true
+    const renderedFailure = await runLayoutCli(directory)
+    expect(renderedFailure.exitCode).toBe(1)
+    expect(renderedFailure.stderr).toBe('')
+    expect(renderedFailure.stdout).toContain('passed [layout-source-size] at 52px')
+    expect(renderedFailure.stdout).toContain('with-button: error [layout-size]')
+
+    writeFileSync(join(directory, 'Composer.tsx'), `
+declare const runtimeClasses: string
+export const composer = <div
+  data-fr-layout="composer"
+  className={runtimeClasses}
+  style={{height: 52}}
+/>
+`)
+    withButton = false
+    const staticUnknown = await runLayoutCli(directory)
+    expect(staticUnknown.exitCode).toBe(1)
+    expect(staticUnknown.stderr).toBe('')
+    expect(staticUnknown.stdout).toContain('unknown [layout-source-coverage]')
+    expect(staticUnknown.stdout).toContain('with-button: all 1 constraints passed')
+
+    writeFileSync(join(directory, 'Composer.tsx'), `
+export const composer = <div data-fr-layout="composer" className="flex flex-col border">
+  <div className="flex" style={{paddingTop: 11, paddingBottom: 11}}>
+    <div style={{height: 30}} />
+  </div>
+</div>
+`)
+    withButton = true
 
     writeFileSync(join(directory, 'freerange.layout.json'), JSON.stringify({
       baseUrl: server.url.href,
       targets: [
-        {name: 'composer', selector: '#composer'},
+        {
+          name: 'composer',
+          selector: '[data-fr-layout="composer"]',
+          source: {kind: 'jsx', file: 'Composer.tsx', marker: 'composer'},
+        },
         {name: 'feed-track', selector: '#feed-track'},
         {name: 'sidebar-track', selector: '#sidebar-track'},
       ],
@@ -192,7 +252,7 @@ function fixture(withButton: boolean, delayedButton = false): string {
   #feed-content { top: 100px; }
   #sidebar-content { top: ${withButton ? 130 : 100}px; }
 </style>
-<div id="composer">
+<div id="composer" data-fr-layout="composer">
   <div id="prompt-scroll"><div id="prompt-line">Prompt</div></div>
   <button>Send</button>
   ${button}
