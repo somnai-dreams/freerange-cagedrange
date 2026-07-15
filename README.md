@@ -24,8 +24,9 @@ There's no API =). Your TypeScript code provides enough information for Freerang
 - `fr`: print project errors and warnings
 - `fr --audit`: print every function's contracts, plus refactor suggestions to help Freerange analyze better. Great for agents
 - `fr --spacing`: scan JSX for spacing-ownership findings — elements that mix inline-style positioning with class-based spacing
+- `fr --layout`: render named routes in headless Chrome and enforce exact-size and edge-alignment contracts from `freerange.layout.json`
 
-Pass a file path to any command to filter down to just that file's report.
+Pass a file path to `fr`, `fr --audit`, or `fr --spacing` to filter down to just that file's report. `fr --layout` instead accepts an optional layout-config path and otherwise searches upward for `freerange.layout.json`.
 
 `fr` directly uses TypeScript under the hood, so it naturally respects your `tsconfig`. We output TS errors before our analysis, so technically, you can swap out your explicit `tsc --noEmit` command for `fr` and nothing changes!
 
@@ -176,7 +177,61 @@ The no-position check also keeps the conditions under which an inline offset has
 
 Every intrinsic element contributes a coverage result: complete, partial with every known limitation, or unsupported with the first blocker. A props spread, computed class, opaque style member, computed offset presence, or uncorrelated position and offset condition therefore appears under `coverage limits`, not as a finding. Visible conflicts still report on a partially covered element, while an absence-based finding such as an offset with no position stands down unless the visible syntax proves the absence. The finding count contains only ownership problems. Library users can call `auditSpacingSource(file, source)` to receive the element audits and can pass those audits to `formatSpacingReport`. The public result keeps findings, coverage, and spacing values as separate fields.
 
-After the findings, the report prints the project's spacing vocabulary: every margin, padding, and gap amount from class utilities and literal inline styles, grouped by axis and kind, most common first. Values used once or twice print on a separate `rare:` line with their locations — a value like `13px` in a 4px-grid codebase, or one `mb-2.5` among `mb-2`s, is where an inconsistency hides. The structured audit retains whether an amount came from Tailwind's numeric scale, px, or rem. The CLI normalizes the distribution with an explicit Tailwind step of `0.25rem` and root font size of `16px`, and prints only the assumptions the values actually use. A report containing only px values prints no assumption; rem prints the root font size; Tailwind numeric utilities print both. An inline style value that is a name appears under that name, e.g. `clusterPaddingY ×2`, so TypeScript-computed spacing is visible in the same distribution even though its value is not statically knowable. The distribution reports declared spacing, not rendered geometry: proving what gap two boxes actually render with would require either executing layout code or relating correlated values across an expression, both outside the analyzer's current scope by deliberate decision.
+After the findings, the report prints the project's spacing vocabulary: every margin, padding, and gap amount from class utilities and literal inline styles, grouped by axis and kind, most common first. Values used once or twice print on a separate `rare:` line with their locations — a value like `13px` in a 4px-grid codebase, or one `mb-2.5` among `mb-2`s, is where an inconsistency hides. The structured audit retains whether an amount came from Tailwind's numeric scale, px, or rem. The CLI normalizes the distribution with an explicit Tailwind step of `0.25rem` and root font size of `16px`, and prints only the assumptions the values actually use. A report containing only px values prints no assumption; rem prints the root font size; Tailwind numeric utilities print both. An inline style value that is a name appears under that name, e.g. `clusterPaddingY ×2`, so TypeScript-computed spacing is visible in the same distribution even though its value is not statically knowable. The distribution reports declared spacing, not rendered geometry: proving the final browser result remains outside the static spacing audit's scope. Use a rendered layout contract for final sizes and relationships that matter.
+
+## Rendered layout contracts
+
+`bun fr.ts --layout` checks final browser geometry where source syntax is not enough. A suite names deterministic URLs and viewports, gives important elements stable selectors, and states exact size or shared-edge constraints. This catches composition across React components, stylesheets, flex intrinsic sizing, fonts, and conditional children without pretending that Freerange contains a partial CSS layout engine.
+
+For example, this suite checks that a resting input row remains 52px when a route adds another button, and that the feed and sidebar content begin on the same horizontal line:
+
+```json
+{
+  "baseUrl": "http://127.0.0.1:3000",
+  "targets": [
+    {"name": "composer", "selector": "[data-fr-layout=\"composer\"]"},
+    {"name": "feed-content", "selector": "[data-fr-layout=\"feed-content\"]"},
+    {"name": "sidebar-content", "selector": "[data-fr-layout=\"sidebar-content\"]"}
+  ],
+  "scenarios": [
+    {
+      "name": "create",
+      "url": "/create",
+      "viewport": {"width": 1440, "height": 900},
+      "readySelector": "[data-fr-layout-ready=\"create\"]"
+    },
+    {
+      "name": "create-with-search",
+      "url": "/create?search=1",
+      "viewport": {"width": 1440, "height": 900},
+      "readySelector": "[data-fr-layout-ready=\"create-with-search\"]"
+    }
+  ],
+  "constraints": [
+    {
+      "kind": "equalsPixels",
+      "name": "resting composer height",
+      "target": "composer",
+      "metric": {"kind": "size", "axis": "block"},
+      "pixels": 52,
+      "tolerancePx": 0.25,
+      "scenarios": ["create", "create-with-search"]
+    },
+    {
+      "kind": "align",
+      "name": "feed and styles content start together",
+      "targets": ["feed-content", "sidebar-content"],
+      "metric": {"kind": "edge", "axis": "block", "edge": "start"},
+      "tolerancePx": 0.5,
+      "scenarios": ["create"]
+    }
+  ]
+}
+```
+
+Each constraint states exactly which scenarios it covers. Passing `create` does not claim that an unrendered React branch, route, viewport, scroll position, or application state is safe. Each scenario's `readySelector` must match exactly one element once that named state has finished rendering; using `body` is appropriate only for a static page. A missing selector, multiple matches, an element without a principal box, unsupported writing mode, unsuccessful page response, invalid readiness selector, or geometry that does not settle is `unknown` coverage rather than a pass.
+
+The runner requires a successful main-document response, waits for the readiness selector and `document.fonts.ready`, then requires 15 consecutive stable animation frames. Exact-size failures report the measured size and every largest in-flow direct child margin box along the constrained axis when the target grew. That evidence often includes the control that expanded a flex row without claiming that any listed child necessarily caused the final size. The target itself should be the state whose size is invariant: a composer that legitimately grows for multiline input can constrain its resting row or list only resting scenarios instead of asserting that the entire composer is always 52px.
 
 ## Recommended TypeScript Config
 

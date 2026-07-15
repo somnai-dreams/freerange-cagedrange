@@ -20,6 +20,14 @@ export function auditSource(file: string, source: string): FileAudit {
 export {formatReport} from './report/index.ts'
 export {formatFileAuditUnit, refactorGuide, refactorGuides} from './audit.ts'
 export {auditSpacingSource, formatSpacingReport, spacingPreamble} from './spacing/index.ts'
+export {
+  auditLayoutSnapshot,
+  auditLayoutSnapshots,
+  findChromeExecutable,
+  formatLayoutReport,
+  parseLayoutSuite,
+  runLayoutSuite,
+} from './layout/index.ts'
 export type {AuditCoverage, AuditReason, AuditReference, FileAudit, RefactorGuide, RefactorGuideID} from './audit.ts'
 export type {AnalysisReport} from './report/index.ts'
 export type {
@@ -36,3 +44,20 @@ export type {
   SpacingValue,
   SpacingValueKind,
 } from './spacing/index.ts'
+export type {
+  LayoutAxis,
+  LayoutBox,
+  LayoutCheck,
+  LayoutChildBox,
+  LayoutConstraint,
+  LayoutMetric,
+  LayoutRect,
+  LayoutScenario,
+  LayoutScenarioAudit,
+  LayoutScenarioSnapshot,
+  LayoutSuite,
+  LayoutSuiteAudit,
+  LayoutTarget,
+  LayoutTargetObservation,
+  LayoutUnknownReason,
+} from './layout/index.ts'
