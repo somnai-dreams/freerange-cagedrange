@@ -35,10 +35,19 @@ export type LayoutConstraint =
       scenarios: [string, ...string[]]
     }
 
+export type LayoutAlignmentInference = {
+  name: string
+  tracks: [string, string, ...string[]]
+  axis: LayoutAxis
+  tolerancePx: number
+  scenarios: [string, ...string[]]
+}
+
 export type LayoutSuite = {
   targets: LayoutTarget[]
   scenarios: LayoutScenario[]
   constraints: LayoutConstraint[]
+  inferAlignments: LayoutAlignmentInference[]
 }
 
 export type LayoutRect = {
@@ -53,6 +62,7 @@ export type LayoutRect = {
 export type LayoutChildBox = {
   label: string
   selector: string
+  band: string | null
   position: string
   rect: LayoutRect
   marginTop: number
@@ -133,7 +143,54 @@ export type LayoutCheck =
 export type LayoutScenarioAudit = {
   scenario: string
   checks: LayoutCheck[]
+  inferences: LayoutInference[]
 }
+
+export type LayoutInferenceEvidence = {
+  track: string
+  child: string
+  selector: string
+  position: number
+}
+
+export type LayoutInferenceAmbiguity = {
+  kind: 'trackChildCountMismatch'
+  tracks: string[]
+  counts: number[]
+}
+
+export type LayoutInferenceUnknownReason = LayoutUnknownReason | {kind: 'noVisibleTrackChildren'}
+
+export type LayoutInference =
+  | {
+      kind: 'candidate'
+      scenario: string
+      inference: string
+      confidence: 'strong' | 'ambiguous'
+      axis: LayoutAxis
+      childIndex: number
+      band: string | null
+      tolerancePx: number
+      deltaPx: number
+      evidence: LayoutInferenceEvidence[]
+    }
+  | {
+      kind: 'ambiguous'
+      scenario: string
+      inference: string
+      reason: LayoutInferenceAmbiguity
+    }
+  | {
+      kind: 'aligned'
+      scenario: string
+      inference: string
+    }
+  | {
+      kind: 'unknown'
+      scenario: string
+      inference: string
+      reason: LayoutInferenceUnknownReason
+    }
 
 export type LayoutSuiteAudit = {
   scenarios: LayoutScenarioAudit[]

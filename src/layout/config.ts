@@ -1,4 +1,5 @@
 import type {
+  LayoutAlignmentInference,
   LayoutAxis,
   LayoutConstraint,
   LayoutMetric,
@@ -9,7 +10,7 @@ import type {
 
 export function parseLayoutSuite(value: unknown): LayoutSuite {
   const root = record(value, 'layout suite')
-  exactKeys(root, ['baseUrl', 'targets', 'scenarios', 'constraints'], 'layout suite')
+  exactKeys(root, ['baseUrl', 'targets', 'scenarios', 'constraints', 'inferAlignments'], 'layout suite')
   const baseUrl = optionalString(root['baseUrl'], 'layout suite.baseUrl')
   if (baseUrl != null) parseAbsoluteUrl(baseUrl, 'layout suite.baseUrl')
 
@@ -19,10 +20,13 @@ export function parseLayoutSuite(value: unknown): LayoutSuite {
     parseScenario(scenario, `layout suite.scenarios[${index}]`, baseUrl))
   const constraints = array(root['constraints'], 'layout suite.constraints').map((constraint, index) =>
     parseConstraint(constraint, `layout suite.constraints[${index}]`))
+  const inferAlignments = optionalArray(root['inferAlignments'], 'layout suite.inferAlignments')
+    .map((inference, index) => parseAlignmentInference(inference, `layout suite.inferAlignments[${index}]`))
 
   uniqueNames(targets, 'target')
   uniqueNames(scenarios, 'scenario')
   uniqueNames(constraints, 'constraint')
+  uniqueNames(inferAlignments, 'alignment inference')
 
   const targetNames = new Set(targets.map(target => target.name))
   const scenarioNames = new Set(scenarios.map(scenario => scenario.name))
@@ -39,8 +43,35 @@ export function parseLayoutSuite(value: unknown): LayoutSuite {
       }
     }
   }
+  for (const inference of inferAlignments) {
+    for (const track of inference.tracks) {
+      if (!targetNames.has(track)) {
+        throw new Error(`Layout alignment inference '${inference.name}' references unknown target '${track}'.`)
+      }
+    }
+    for (const scenario of inference.scenarios) {
+      if (!scenarioNames.has(scenario)) {
+        throw new Error(`Layout alignment inference '${inference.name}' references unknown scenario '${scenario}'.`)
+      }
+    }
+  }
 
-  return {targets, scenarios, constraints}
+  return {targets, scenarios, constraints, inferAlignments}
+}
+
+function parseAlignmentInference(value: unknown, path: string): LayoutAlignmentInference {
+  const inference = record(value, path)
+  exactKeys(inference, ['name', 'tracks', 'axis', 'tolerancePx', 'scenarios'], path)
+  const tracks = stringArray(inference['tracks'], `${path}.tracks`)
+  if (tracks.length < 2) throw new Error(`${path}.tracks must contain at least two targets.`)
+  if (new Set(tracks).size !== tracks.length) throw new Error(`${path}.tracks must not repeat a target.`)
+  return {
+    name: nonEmptyString(inference['name'], `${path}.name`),
+    tracks: tracks as [string, string, ...string[]],
+    axis: layoutAxis(inference['axis'], `${path}.axis`),
+    tolerancePx: nonnegativeFiniteNumber(inference['tolerancePx'], `${path}.tolerancePx`),
+    scenarios: nonEmptyStringArray(inference['scenarios'], `${path}.scenarios`),
+  }
 }
 
 function parseTarget(value: unknown, path: string): LayoutTarget {
@@ -148,6 +179,10 @@ function record(value: unknown, path: string): Record<string, unknown> {
 function array(value: unknown, path: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${path} must be an array.`)
   return value
+}
+
+function optionalArray(value: unknown, path: string): unknown[] {
+  return value === undefined ? [] : array(value, path)
 }
 
 function nonEmptyString(value: unknown, path: string): string {

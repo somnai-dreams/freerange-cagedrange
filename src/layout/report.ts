@@ -1,19 +1,79 @@
-import type {LayoutCheck, LayoutSuiteAudit, LayoutUnknownReason} from './model.ts'
+import type {
+  LayoutCheck,
+  LayoutInference,
+  LayoutInferenceUnknownReason,
+  LayoutSuiteAudit,
+  LayoutUnknownReason,
+} from './model.ts'
 
 export function formatLayoutReport(audit: LayoutSuiteAudit): string {
   const checks = audit.scenarios.flatMap(scenario => scenario.checks)
   const failures = checks.filter(check => check.kind === 'fail')
   const unknown = checks.filter(check => check.kind === 'unknown')
+  const inferences = audit.scenarios.flatMap(scenario => scenario.inferences)
   const lines = [
     'Rendered layout contracts:',
     ...audit.scenarios.flatMap(scenario => formatScenario(scenario.scenario, scenario.checks)),
   ]
   if (checks.length === 0) lines.push('No layout constraints apply to the configured scenarios.')
+  const visibleInferences = inferences.filter(inference => inference.kind !== 'aligned')
+  if (visibleInferences.length > 0) {
+    lines.push('alignment inference:', ...visibleInferences.flatMap(formatInference))
+  }
   lines.push(
     `layout contracts: ${checks.length - failures.length - unknown.length}/${checks.length} passed; `
       + `${failures.length} failed; ${unknown.length} unknown`,
   )
+  if (inferences.length > 0) {
+    const strong = inferences.filter(inference => inference.kind === 'candidate' && inference.confidence === 'strong')
+    const ambiguous = inferences.filter(isAmbiguousInference)
+    const aligned = inferences.filter(inference => inference.kind === 'aligned')
+    const inferenceUnknown = inferences.filter(inference => inference.kind === 'unknown')
+    lines.push(
+      `alignment inference: ${aligned.length} aligned; `
+        + `${strong.length} strong suggestion${strong.length === 1 ? '' : 's'}; `
+        + `${ambiguous.length} ambiguous; ${inferenceUnknown.length} unknown`,
+    )
+  }
   return lines.join('\n')
+}
+
+function formatInference(inference: LayoutInference): string[] {
+  if (inference.kind === 'aligned') return []
+  if (inference.kind === 'candidate') {
+    const prefix = inference.confidence === 'strong' ? 'suggestion' : 'ambiguous'
+    const band = inference.band == null ? `direct child ${inference.childIndex + 1}` : `band '${inference.band}'`
+    return [
+      `  ${inference.scenario}: ${prefix} [layout-alignment-candidate]: ${inference.inference} ${band} `
+        + `${inference.axis} starts differ by ${pixels(inference.deltaPx)}; allowed ±${pixels(inference.tolerancePx)}`,
+      `    ${inference.evidence.map(evidence =>
+        `${evidence.track}: ${evidence.child} at ${pixels(evidence.position)} (${evidence.selector})`).join(' · ')}`,
+    ]
+  }
+  if (inference.kind === 'ambiguous') {
+    const reason = inference.reason
+    return [
+      `  ${inference.scenario}: ambiguous [layout-alignment-candidate]: ${inference.inference} could not pair `
+        + `direct children by order (${reason.tracks.map((track, index) =>
+          `${track}: ${reason.counts[index]}`).join(', ')})`,
+    ]
+  }
+  return [
+    `  ${inference.scenario}: unknown [layout-inference-coverage]: ${inference.inference} — `
+      + formatInferenceReason(inference.reason),
+  ]
+}
+
+function isAmbiguousInference(inference: LayoutInference): boolean {
+  return (inference.kind === 'candidate' && inference.confidence === 'ambiguous')
+    || inference.kind === 'ambiguous'
+}
+
+function formatInferenceReason(reason: LayoutInferenceUnknownReason): string {
+  switch (reason.kind) {
+    case 'noVisibleTrackChildren': return 'the tracks have no visible direct children'
+    default: return formatUnknownReason(reason)
+  }
 }
 
 function formatScenario(scenario: string, checks: LayoutCheck[]): string[] {

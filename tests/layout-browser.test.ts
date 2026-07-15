@@ -27,6 +27,8 @@ test.skipIf(findChromeExecutable() == null)('Chrome measures composed layout in 
         {name: 'composer', selector: '#composer'},
         {name: 'feed-content', selector: '#feed-content'},
         {name: 'sidebar-content', selector: '#sidebar-content'},
+        {name: 'feed-track', selector: '#feed-track'},
+        {name: 'sidebar-track', selector: '#sidebar-track'},
       ],
       scenarios: [
         {name: 'resting', url: '/resting', viewport: {width: 1440, height: 900}, readySelector: 'body'},
@@ -52,9 +54,21 @@ test.skipIf(findChromeExecutable() == null)('Chrome measures composed layout in 
           scenarios: ['resting', 'with-button'],
         },
       ],
+      inferAlignments: [{
+        name: 'gallery columns',
+        tracks: ['feed-track', 'sidebar-track'],
+        axis: 'block',
+        tolerancePx: 0.5,
+        scenarios: ['resting', 'with-button', 'failed'],
+      }],
     })
     const audit = await runLayoutSuite(suite)
     expect(audit.scenarios[0]?.checks.map(check => check.kind)).toEqual(['pass', 'pass'])
+    expect(audit.scenarios[0]?.inferences).toEqual([{
+      kind: 'aligned',
+      scenario: 'resting',
+      inference: 'gallery columns',
+    }])
     expect(audit.scenarios[1]?.checks).toMatchObject([
       {
         kind: 'fail',
@@ -63,9 +77,19 @@ test.skipIf(findChromeExecutable() == null)('Chrome measures composed layout in 
         deltaPx: 2,
         contributors: [{label: 'prompt-scroll'}, {label: 'large-button'}],
       },
-      {kind: 'fail', rule: 'layout-alignment', measurements: [100, 130], deltaPx: 30},
+      {kind: 'fail', rule: 'layout-alignment', measurements: [154, 184], deltaPx: 30},
     ])
+    expect(audit.scenarios[1]?.inferences[0]).toMatchObject({
+      kind: 'candidate',
+      confidence: 'strong',
+      band: 'content',
+      deltaPx: 30,
+    })
     expect(audit.scenarios[2]?.checks[0]).toMatchObject({
+      kind: 'unknown',
+      reason: {kind: 'scenarioFailed'},
+    })
+    expect(audit.scenarios[2]?.inferences[0]).toMatchObject({
       kind: 'unknown',
       reason: {kind: 'scenarioFailed'},
     })
@@ -102,20 +126,47 @@ test.skipIf(findChromeExecutable() == null)('fr --layout finds the project confi
         scenarios: ['with-button'],
       }],
     }))
-    const subprocess = Bun.spawn([process.execPath, freerangeCli, '--layout'], {
-      cwd: directory,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(subprocess.stdout).text(),
-      new Response(subprocess.stderr).text(),
-      subprocess.exited,
-    ])
-    expect(exitCode).toBe(1)
-    expect(stderr).toBe('')
-    expect(stdout).toContain('with-button: error [layout-size]')
-    expect(stdout).toContain('layout contracts: 0/1 passed; 1 failed; 0 unknown')
+    const failed = await runLayoutCli(directory)
+    expect(failed.exitCode).toBe(1)
+    expect(failed.stderr).toBe('')
+    expect(failed.stdout).toContain('with-button: error [layout-size]')
+    expect(failed.stdout).toContain('layout contracts: 0/1 passed; 1 failed; 0 unknown')
+
+    writeFileSync(join(directory, 'freerange.layout.json'), JSON.stringify({
+      baseUrl: server.url.href,
+      targets: [
+        {name: 'composer', selector: '#composer'},
+        {name: 'feed-track', selector: '#feed-track'},
+        {name: 'sidebar-track', selector: '#sidebar-track'},
+      ],
+      scenarios: [{
+        name: 'with-button',
+        url: '/',
+        viewport: {width: 1440, height: 900},
+        readySelector: 'body',
+      }],
+      constraints: [{
+        kind: 'equalsPixels',
+        name: 'current composer height',
+        target: 'composer',
+        metric: {kind: 'size', axis: 'block'},
+        pixels: 54,
+        tolerancePx: 0.25,
+        scenarios: ['with-button'],
+      }],
+      inferAlignments: [{
+        name: 'gallery columns',
+        tracks: ['feed-track', 'sidebar-track'],
+        axis: 'block',
+        tolerancePx: 0.5,
+        scenarios: ['with-button'],
+      }],
+    }))
+    const suggested = await runLayoutCli(directory)
+    expect(suggested.exitCode).toBe(0)
+    expect(suggested.stderr).toBe('')
+    expect(suggested.stdout).toContain('suggestion [layout-alignment-candidate]')
+    expect(suggested.stdout).toContain('alignment inference: 0 aligned; 1 strong suggestion; 0 ambiguous; 0 unknown')
   } finally {
     rmSync(directory, {recursive: true, force: true})
     await server.stop()
@@ -136,16 +187,31 @@ function fixture(withButton: boolean, delayedButton = false): string {
   #prompt-line { height: 30px; }
   button { height: 40px; }
   #large-button { height: 52px; }
+  .track { position: relative; display: inline-block; width: 110px; height: 200px; vertical-align: top; }
   #feed-content, #sidebar-content { position: absolute; height: 50px; width: 100px; }
   #feed-content { top: 100px; }
-  #sidebar-content { top: ${withButton ? 130 : 100}px; left: 120px; }
+  #sidebar-content { top: ${withButton ? 130 : 100}px; }
 </style>
 <div id="composer">
   <div id="prompt-scroll"><div id="prompt-line">Prompt</div></div>
   <button>Send</button>
   ${button}
 </div>
-<div id="feed-content"></div>
-<div id="sidebar-content"></div>
+<div id="feed-track" class="track"><div id="feed-content" data-fr-layout-band="content"></div></div>
+<div id="sidebar-track" class="track"><div id="sidebar-content" data-fr-layout-band="content"></div></div>
 ${script}`
+}
+
+async function runLayoutCli(cwd: string) {
+  const subprocess = Bun.spawn([process.execPath, freerangeCli, '--layout'], {
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(subprocess.stdout).text(),
+    new Response(subprocess.stderr).text(),
+    subprocess.exited,
+  ])
+  return {stdout, stderr, exitCode}
 }

@@ -1,8 +1,11 @@
 import type {
+  LayoutAlignmentInference,
   LayoutBox,
   LayoutCheck,
   LayoutConstraint,
   LayoutContributor,
+  LayoutInference,
+  LayoutInferenceUnknownReason,
   LayoutMetric,
   LayoutScenarioAudit,
   LayoutScenarioSnapshot,
@@ -17,6 +20,7 @@ export function auditLayoutSnapshots(suite: LayoutSuite, snapshots: LayoutScenar
   return {
     scenarios: suite.scenarios.map(scenario => {
       const constraints = suite.constraints.filter(constraint => constraint.scenarios.includes(scenario.name))
+      const inferences = suite.inferAlignments.filter(inference => inference.scenarios.includes(scenario.name))
       const snapshot = snapshotByScenario.get(scenario.name)
       if (snapshot == null) {
         return {
@@ -26,24 +30,46 @@ export function auditLayoutSnapshots(suite: LayoutSuite, snapshots: LayoutScenar
             constraint.name,
             {kind: 'scenarioMissing'},
           )),
+          inferences: inferences.map(inference => unknownInference(
+            scenario.name,
+            inference.name,
+            {kind: 'scenarioMissing'},
+          )),
         }
       }
-      return auditScenario(snapshot, constraints)
+      return auditScenario(snapshot, constraints, inferences)
     }),
   }
 }
 
-export function auditLayoutSnapshot(snapshot: LayoutScenarioSnapshot, constraints: LayoutConstraint[]): LayoutScenarioAudit {
-  return auditScenario(snapshot, constraints.filter(constraint => constraint.scenarios.includes(snapshot.scenario)))
+export function auditLayoutSnapshot(
+  snapshot: LayoutScenarioSnapshot,
+  constraints: LayoutConstraint[],
+  inferences: LayoutAlignmentInference[] = [],
+): LayoutScenarioAudit {
+  return auditScenario(
+    snapshot,
+    constraints.filter(constraint => constraint.scenarios.includes(snapshot.scenario)),
+    inferences.filter(inference => inference.scenarios.includes(snapshot.scenario)),
+  )
 }
 
-function auditScenario(snapshot: LayoutScenarioSnapshot, constraints: LayoutConstraint[]): LayoutScenarioAudit {
+function auditScenario(
+  snapshot: LayoutScenarioSnapshot,
+  constraints: LayoutConstraint[],
+  inferences: LayoutAlignmentInference[],
+): LayoutScenarioAudit {
   if (snapshot.kind === 'failed') {
     return {
       scenario: snapshot.scenario,
       checks: constraints.map(constraint => unknownCheck(
         snapshot.scenario,
         constraint.name,
+        {kind: 'scenarioFailed', message: snapshot.message},
+      )),
+      inferences: inferences.map(inference => unknownInference(
+        snapshot.scenario,
+        inference.name,
         {kind: 'scenarioFailed', message: snapshot.message},
       )),
     }
@@ -56,11 +82,17 @@ function auditScenario(snapshot: LayoutScenarioSnapshot, constraints: LayoutCons
         constraint.name,
         {kind: 'unstableGeometry'},
       )),
+      inferences: inferences.map(inference => unknownInference(
+        snapshot.scenario,
+        inference.name,
+        {kind: 'unstableGeometry'},
+      )),
     }
   }
   return {
     scenario: snapshot.scenario,
     checks: constraints.map(constraint => auditConstraint(snapshot, constraint)),
+    inferences: inferences.flatMap(inference => auditAlignmentInference(snapshot, inference)),
   }
 }
 
@@ -172,4 +204,89 @@ function largestContributors(box: LayoutBox, axis: 'block' | 'inline'): LayoutCo
 
 function unknownCheck(scenario: string, constraint: string, reason: LayoutUnknownReason): LayoutCheck {
   return {kind: 'unknown', scenario, constraint, reason}
+}
+
+function auditAlignmentInference(
+  snapshot: CapturedLayoutSnapshot,
+  inference: LayoutAlignmentInference,
+): LayoutInference[] {
+  const tracks: Array<{name: string; box: LayoutBox}> = []
+  for (const track of inference.tracks) {
+    const observation = snapshot.targets.find(candidate => candidate.target === track)
+    const unresolved = unresolvedTarget(track, observation)
+    if (unresolved != null) return [unknownInference(snapshot.scenario, inference.name, unresolved)]
+    const box = observation!.matches[0]!
+    if (box.writingMode !== 'horizontal-tb') {
+      return [unknownInference(snapshot.scenario, inference.name, {
+        kind: 'unsupportedWritingMode',
+        target: track,
+        writingMode: box.writingMode,
+      })]
+    }
+    tracks.push({name: track, box})
+  }
+
+  const visibleChildren = tracks.map(track => track.box.children.filter(child => child.rect.width > 0 && child.rect.height > 0))
+  const counts = visibleChildren.map(children => children.length)
+  if (counts.some(count => count !== counts[0])) {
+    return [{
+      kind: 'ambiguous',
+      scenario: snapshot.scenario,
+      inference: inference.name,
+      reason: {
+        kind: 'trackChildCountMismatch',
+        tracks: tracks.map(track => track.name),
+        counts,
+      },
+    }]
+  }
+  if (counts[0] === 0) {
+    return [unknownInference(snapshot.scenario, inference.name, {kind: 'noVisibleTrackChildren'})]
+  }
+
+  const candidates: LayoutInference[] = []
+  for (let childIndex = 0; childIndex < counts[0]!; childIndex++) {
+    const children = visibleChildren.map(track => track[childIndex]!)
+    const positions = children.map((child, index) => childStart(child, tracks[index]!.box, inference.axis))
+    const deltaPx = Math.max(...positions) - Math.min(...positions)
+    if (deltaPx <= inference.tolerancePx) continue
+    const band = children[0]!.band
+    const sharedBand = band != null
+      && band.trim() !== ''
+      && children.every(child => child.band === band)
+      && visibleChildren.every(trackChildren => trackChildren.filter(child => child.band === band).length === 1)
+    candidates.push({
+      kind: 'candidate',
+      scenario: snapshot.scenario,
+      inference: inference.name,
+      confidence: sharedBand ? 'strong' : 'ambiguous',
+      axis: inference.axis,
+      childIndex,
+      band: sharedBand ? band : null,
+      tolerancePx: inference.tolerancePx,
+      deltaPx,
+      evidence: children.map((child, index) => ({
+        track: tracks[index]!.name,
+        child: child.label,
+        selector: child.selector,
+        position: positions[index]!,
+      })),
+    })
+  }
+  return candidates.length === 0
+    ? [{kind: 'aligned', scenario: snapshot.scenario, inference: inference.name}]
+    : candidates
+}
+
+function childStart(child: LayoutBox['children'][number], track: LayoutBox, axis: 'block' | 'inline'): number {
+  if (axis === 'block') return child.rect.top
+  return track.direction === 'rtl' ? child.rect.right : child.rect.left
+}
+
+function unknownInference(
+  scenario: string,
+  inference: string,
+  reason: LayoutInferenceUnknownReason,
+): LayoutInference {
+  return {kind: 'unknown', scenario, inference, reason}
 }

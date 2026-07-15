@@ -191,7 +191,9 @@ For example, this suite checks that a resting input row remains 52px when a rout
   "targets": [
     {"name": "composer", "selector": "[data-fr-layout=\"composer\"]"},
     {"name": "feed-content", "selector": "[data-fr-layout=\"feed-content\"]"},
-    {"name": "sidebar-content", "selector": "[data-fr-layout=\"sidebar-content\"]"}
+    {"name": "sidebar-content", "selector": "[data-fr-layout=\"sidebar-content\"]"},
+    {"name": "feed-track", "selector": "[data-fr-layout=\"feed-track\"]"},
+    {"name": "sidebar-track", "selector": "[data-fr-layout=\"sidebar-track\"]"}
   ],
   "scenarios": [
     {
@@ -225,6 +227,15 @@ For example, this suite checks that a resting input row remains 52px when a rout
       "tolerancePx": 0.5,
       "scenarios": ["create"]
     }
+  ],
+  "inferAlignments": [
+    {
+      "name": "gallery columns",
+      "tracks": ["feed-track", "sidebar-track"],
+      "axis": "block",
+      "tolerancePx": 0.5,
+      "scenarios": ["create"]
+    }
   ]
 }
 ```
@@ -232,6 +243,8 @@ For example, this suite checks that a resting input row remains 52px when a rout
 Each constraint states exactly which scenarios it covers. Passing `create` does not claim that an unrendered React branch, route, viewport, scroll position, or application state is safe. Each scenario's `readySelector` must match exactly one element once that named state has finished rendering; using `body` is appropriate only for a static page. A missing selector, multiple matches, an element without a principal box, unsupported writing mode, unsuccessful page response, invalid readiness selector, or geometry that does not settle is `unknown` coverage rather than a pass.
 
 The runner requires a successful main-document response, waits for the readiness selector and `document.fonts.ready`, then requires 15 consecutive stable animation frames. Exact-size failures report the measured size and every largest in-flow direct child margin box along the constrained axis when the target grew. That evidence often includes the control that expanded a flex row without claiming that any listed child necessarily caused the final size. The target itself should be the state whose size is invariant: a composer that legitimately grows for multiline input can constrain its resting row or list only resting scenarios instead of asserting that the entire composer is always 52px.
+
+Alignment inference is deliberately narrower than explicit contracts. An `inferAlignments` entry names two or more rendered track targets and an axis. Freerange compares their visible direct children in order and prints a candidate when corresponding starts differ beyond the tolerance. Matching non-empty `data-fr-layout-band` values, e.g. `content` on both columns' content wrappers, make the suggestion strong. Unmarked pairs and different direct-child counts print as ambiguous, not as proof of a bug. Inference never scans the whole page and never fails CI: promote a useful candidate by adding stable targets and an explicit `align` constraint.
 
 ## Recommended TypeScript Config
 

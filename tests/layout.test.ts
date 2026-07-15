@@ -50,6 +50,7 @@ const suite: LayoutSuite = {
     },
   ],
   constraints,
+  inferAlignments: [],
 }
 
 describe('rendered layout contracts', () => {
@@ -260,6 +261,131 @@ describe('rendered layout contracts', () => {
     expect(report).toContain("unknown [layout-coverage]: content starts align — target 'sidebar-content' did not render")
     expect(report).toContain('layout contracts: 0/2 passed; 1 failed; 1 unknown')
   })
+
+  test('marked tracks infer ordered child-band alignment without creating contract failures', () => {
+    const inference = {
+      name: 'gallery columns',
+      tracks: ['feed-track', 'sidebar-track'] as [string, string],
+      axis: 'block' as const,
+      tolerancePx: 0.5,
+      scenarios: ['resting'] as [string],
+    }
+    const audit = auditLayoutSnapshots(
+      {...suite, constraints: [], inferAlignments: [inference], scenarios: [suite.scenarios[0]!]},
+      [snapshot('resting', [
+        observation('feed-track', box(0, 500, [
+          trackChild('feed controls', 230, 'controls'),
+          trackChild('feed content', 286, 'content'),
+        ])),
+        observation('sidebar-track', box(0, 500, [
+          trackChild('sidebar controls', 230, 'controls'),
+          trackChild('sidebar content', 316, 'content'),
+        ])),
+      ])],
+    )
+
+    expect(audit.scenarios[0]?.checks).toEqual([])
+    expect(audit.scenarios[0]?.inferences).toEqual([{
+      kind: 'candidate',
+      scenario: 'resting',
+      inference: 'gallery columns',
+      confidence: 'strong',
+      axis: 'block',
+      childIndex: 1,
+      band: 'content',
+      tolerancePx: 0.5,
+      deltaPx: 30,
+      evidence: [
+        {track: 'feed-track', child: 'feed content', selector: '#feed-track > feed-content', position: 286},
+        {track: 'sidebar-track', child: 'sidebar content', selector: '#sidebar-track > sidebar-content', position: 316},
+      ],
+    }])
+  })
+
+  test('unmarked and structurally different tracks remain visibly ambiguous', () => {
+    const inference = {
+      name: 'gallery columns',
+      tracks: ['feed-track', 'sidebar-track'] as [string, string],
+      axis: 'block' as const,
+      tolerancePx: 0.5,
+      scenarios: ['resting'] as [string],
+    }
+    const ambiguous = auditLayoutSnapshots(
+      {...suite, constraints: [], inferAlignments: [inference], scenarios: [suite.scenarios[0]!]},
+      [snapshot('resting', [
+        observation('feed-track', box(0, 500, [trackChild('feed content', 286)])),
+        observation('sidebar-track', box(0, 500, [trackChild('sidebar content', 316)])),
+      ])],
+    )
+    expect(ambiguous.scenarios[0]?.inferences[0]).toMatchObject({
+      kind: 'candidate',
+      confidence: 'ambiguous',
+      deltaPx: 30,
+    })
+    expect(formatLayoutReport(ambiguous)).toContain('ambiguous [layout-alignment-candidate]')
+
+    const differentStructures = auditLayoutSnapshots(
+      {...suite, constraints: [], inferAlignments: [inference], scenarios: [suite.scenarios[0]!]},
+      [snapshot('resting', [
+        observation('feed-track', box(0, 500, [trackChild('feed controls', 230), trackChild('feed content', 286)])),
+        observation('sidebar-track', box(0, 500, [trackChild('sidebar content', 316)])),
+      ])],
+    )
+    expect(differentStructures.scenarios[0]?.inferences[0]).toMatchObject({
+      kind: 'ambiguous',
+      reason: {kind: 'trackChildCountMismatch', counts: [2, 1]},
+    })
+    expect(formatLayoutReport(differentStructures)).toContain('could not pair direct children by order')
+  })
+
+  test('aligned tracks remain visible while weak band markers do not create strong suggestions', () => {
+    const inference = {
+      name: 'gallery columns',
+      tracks: ['feed-track', 'sidebar-track'] as [string, string],
+      axis: 'block' as const,
+      tolerancePx: 0.5,
+      scenarios: ['resting'] as [string],
+    }
+    const aligned = auditLayoutSnapshots(
+      {...suite, constraints: [], inferAlignments: [inference], scenarios: [suite.scenarios[0]!]},
+      [snapshot('resting', [
+        observation('feed-track', box(0, 500, [trackChild('feed content', 286, 'content')])),
+        observation('sidebar-track', box(0, 500, [trackChild('sidebar content', 286, 'content')])),
+      ])],
+    )
+    expect(aligned.scenarios[0]?.inferences).toEqual([{
+      kind: 'aligned',
+      scenario: 'resting',
+      inference: 'gallery columns',
+    }])
+    expect(formatLayoutReport(aligned)).toContain(
+      'alignment inference: 1 aligned; 0 strong suggestions; 0 ambiguous; 0 unknown',
+    )
+
+    const weakBandSets = [
+      {controls: 'controls', content: ''},
+      {controls: 'content', content: 'content'},
+    ]
+    for (const bands of weakBandSets) {
+      const duplicatedBand = auditLayoutSnapshots(
+        {...suite, constraints: [], inferAlignments: [inference], scenarios: [suite.scenarios[0]!]},
+        [snapshot('resting', [
+          observation('feed-track', box(0, 500, [
+            trackChild('feed controls', 230, bands.controls),
+            trackChild('feed content', 286, bands.content),
+          ])),
+          observation('sidebar-track', box(0, 500, [
+            trackChild('sidebar controls', 230, bands.controls),
+            trackChild('sidebar content', 316, bands.content),
+          ])),
+        ])],
+      )
+      expect(duplicatedBand.scenarios[0]?.inferences[0]).toMatchObject({
+        kind: 'candidate',
+        confidence: 'ambiguous',
+      })
+    }
+  })
 })
 
 function snapshot(
@@ -292,11 +418,22 @@ function child(
   return {
     label,
     selector: `#composer > ${label.replaceAll(' ', '-')}`,
+    band: null,
     position,
     rect: {top: 0, right: width, bottom: height, left: 0, width, height},
     marginTop: 0,
     marginRight: 0,
     marginBottom: 0,
     marginLeft: 0,
+  }
+}
+
+function trackChild(label: string, top: number, band: string | null = null): LayoutBox['children'][number] {
+  const value = child(label, 40)
+  return {
+    ...value,
+    selector: `#${label.startsWith('feed') ? 'feed' : 'sidebar'}-track > ${label.replaceAll(' ', '-')}`,
+    band,
+    rect: {...value.rect, top, bottom: top + value.rect.height},
   }
 }

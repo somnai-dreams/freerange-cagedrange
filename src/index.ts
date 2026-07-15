@@ -46,11 +46,16 @@ export type {
 } from './spacing/index.ts'
 export type {
   LayoutAxis,
+  LayoutAlignmentInference,
   LayoutBox,
   LayoutCheck,
   LayoutChildBox,
   LayoutConstraint,
   LayoutMetric,
+  LayoutInference,
+  LayoutInferenceAmbiguity,
+  LayoutInferenceEvidence,
+  LayoutInferenceUnknownReason,
   LayoutRect,
   LayoutScenario,
   LayoutScenarioAudit,

@@ -368,6 +368,7 @@ function captureExpression(targets: LayoutTarget[], readySelector: string): stri
       return {
         label,
         selector: parentSelector + ' > :nth-child(' + (index + 1) + ')',
+        band: element.getAttribute('data-fr-layout-band'),
         position: style.position,
         rect: rect(element.getBoundingClientRect()),
         marginTop: number(style.marginTop),

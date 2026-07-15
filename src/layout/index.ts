@@ -4,11 +4,16 @@ export {parseLayoutSuite} from './config.ts'
 export {formatLayoutReport} from './report.ts'
 export type {
   LayoutAxis,
+  LayoutAlignmentInference,
   LayoutBox,
   LayoutCheck,
   LayoutChildBox,
   LayoutConstraint,
   LayoutMetric,
+  LayoutInference,
+  LayoutInferenceAmbiguity,
+  LayoutInferenceEvidence,
+  LayoutInferenceUnknownReason,
   LayoutRect,
   LayoutScenario,
   LayoutScenarioAudit,

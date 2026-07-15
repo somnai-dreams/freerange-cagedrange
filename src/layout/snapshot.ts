@@ -48,6 +48,7 @@ function parseChild(value: unknown, path: string): LayoutChildBox {
   return {
     label: string(child['label'], `${path}.label`),
     selector: string(child['selector'], `${path}.selector`),
+    band: nullableString(child['band'], `${path}.band`),
     position: string(child['position'], `${path}.position`),
     rect: parseRect(child['rect'], `${path}.rect`),
     marginTop: finiteNumber(child['marginTop'], `${path}.marginTop`),
@@ -82,6 +83,11 @@ function array(value: unknown, path: string): unknown[] {
 function string(value: unknown, path: string): string {
   if (typeof value !== 'string') throw new Error(`${path} must be a string.`)
   return value
+}
+
+function nullableString(value: unknown, path: string): string | null {
+  if (value === null) return null
+  return string(value, path)
 }
 
 function boolean(value: unknown, path: string): boolean {

@@ -30,6 +30,13 @@ const suite = {
       scenarios: ['resting'],
     },
   ],
+  inferAlignments: [{
+    name: 'gallery columns',
+    tracks: ['feed-content', 'sidebar-content'],
+    axis: 'block',
+    tolerancePx: 0.5,
+    scenarios: ['resting'],
+  }],
 }
 
 describe('layout suite parsing', () => {
@@ -37,6 +44,7 @@ describe('layout suite parsing', () => {
     const parsed = parseLayoutSuite(suite)
     expect(parsed.scenarios[0]?.url).toBe('http://127.0.0.1:3000/app/resting')
     expect(parsed.constraints.map(constraint => constraint.kind)).toEqual(['equalsPixels', 'align'])
+    expect(parsed.inferAlignments.map(inference => inference.name)).toEqual(['gallery columns'])
   })
 
   test('rejects unknown fields, malformed metrics, and invalid numbers', () => {
@@ -86,6 +94,14 @@ describe('layout suite parsing', () => {
     expect(() => parseLayoutSuite({
       ...suite,
       constraints: [{...suite.constraints[1], targets: ['feed-content', 'feed-content']}],
+    })).toThrow('must not repeat a target')
+    expect(() => parseLayoutSuite({
+      ...suite,
+      inferAlignments: [{...suite.inferAlignments[0], tracks: ['feed-content']}],
+    })).toThrow('must contain at least two targets')
+    expect(() => parseLayoutSuite({
+      ...suite,
+      inferAlignments: [{...suite.inferAlignments[0], tracks: ['feed-content', 'feed-content']}],
     })).toThrow('must not repeat a target')
   })
 })
