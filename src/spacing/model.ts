@@ -73,6 +73,16 @@ export type SpacingAmount =
 
 export type ClassFact =
   | {
+      // A literal class outside the bounded Tailwind positioning and spacing dialect.
+      // Its CSS may still affect spacing or positioning, so absence-based ownership
+      // checks cannot treat the class as harmless.
+      kind: 'unmodeled'
+      token: string
+      target: DeclarationTarget
+      condition: DeclarationCondition
+      resembles: 'offset' | 'spacing' | 'other'
+    }
+  | {
       kind: 'position'
       token: string
       status: PositionStatus
@@ -126,6 +136,7 @@ export type SpacingCoverageReason =
   | {kind: 'computedPosition'}
   | {kind: 'computedOffsetPresence'}
   | {kind: 'uncorrelatedPositionAndOffset'}
+  | {kind: 'unmodeledClass'; className: string}
 
 export type SpacingElementCoverage =
   | {kind: 'complete'}

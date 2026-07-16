@@ -107,6 +107,8 @@ function coverageReason(reason: SpacingCoverageReason): string {
     case 'computedOffsetPresence': return 'whether the inline offset has a value is computed'
     case 'uncorrelatedPositionAndOffset':
       return 'the conditional position and inline offset could not be correlated'
+    case 'unmodeledClass':
+      return `class '${reason.className}' is outside the modeled Tailwind dialect and may affect spacing or positioning`
   }
 }
 

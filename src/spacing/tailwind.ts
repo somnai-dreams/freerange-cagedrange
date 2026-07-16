@@ -48,7 +48,9 @@ export function parseTailwindClass(rawToken: string): ClassFact | null {
   }
 
   const parsed = parseSpacingUtility(utility)
-  if (parsed == null) return null
+  if (parsed == null) {
+    return {kind: 'unmodeled', token: rawToken, target, condition, resembles: unmodeledResemblance(utility)}
+  }
   return {
     kind: parsed.kind,
     token: rawToken,
@@ -62,37 +64,45 @@ export function parseTailwindClass(rawToken: string): ClassFact | null {
 function parseSpacingUtility(
   utility: string,
 ): {axis: SpacingAxis | 'both'; kind: 'margin' | 'padding' | 'gap'; value: string} | null {
-  if (hasUtilityRoot(utility, 'gap-x')) return {axis: 'horizontal', kind: 'gap', value: utility.slice(6)}
-  if (hasUtilityRoot(utility, 'gap-y')) return {axis: 'vertical', kind: 'gap', value: utility.slice(6)}
+  if (hasUtilityRoot(utility, 'gap-x')) return knownSpacingValue(utility.slice(6), 'horizontal', 'gap')
+  if (hasUtilityRoot(utility, 'gap-y')) return knownSpacingValue(utility.slice(6), 'vertical', 'gap')
   if (hasUtilityRoot(utility, 'space-x')) {
     const value = utility.slice(8)
-    return value === 'reverse' ? null : {axis: 'horizontal', kind: 'gap', value}
+    return value === 'reverse' ? null : knownSpacingValue(value, 'horizontal', 'gap')
   }
   if (hasUtilityRoot(utility, 'space-y')) {
     const value = utility.slice(8)
-    return value === 'reverse' ? null : {axis: 'vertical', kind: 'gap', value}
+    return value === 'reverse' ? null : knownSpacingValue(value, 'vertical', 'gap')
   }
   const root = utilityRoot(utility)
   if (root == null) return null
   const value = utilityValue(utility)
   if (value == null) return null
   switch (root) {
-    case 'gap': return {axis: 'both', kind: 'gap', value}
-    case 'p': return {axis: 'both', kind: 'padding', value}
+    case 'gap': return knownSpacingValue(value, 'both', 'gap')
+    case 'p': return knownSpacingValue(value, 'both', 'padding')
     case 'pt':
     case 'pb':
-    case 'py': return {axis: 'vertical', kind: 'padding', value}
+    case 'py': return knownSpacingValue(value, 'vertical', 'padding')
     case 'pl':
     case 'pr':
     case 'px':
     case 'ps':
-    case 'pe': return {axis: 'horizontal', kind: 'padding', value}
+    case 'pe': return knownSpacingValue(value, 'horizontal', 'padding')
     default: {
       const marginAxis = marginUtilityAxis(utility)
       if (marginAxis == null) return null
-      return {axis: marginAxis, kind: 'margin', value}
+      return knownSpacingValue(value, marginAxis, 'margin')
     }
   }
+}
+
+function knownSpacingValue(
+  value: string,
+  axis: SpacingAxis | 'both',
+  kind: 'margin' | 'padding' | 'gap',
+): {axis: SpacingAxis | 'both'; kind: 'margin' | 'padding' | 'gap'; value: string} | null {
+  return isKnownTailwindLength(value) ? {axis, kind, value} : null
 }
 
 function classAmount(value: string, negative: boolean): SpacingAmount {
@@ -135,15 +145,16 @@ function marginUtilityAxis(utility: string): SpacingAxis | 'both' | null {
 }
 
 function offsetUtilityProperties(utility: string): OffsetProperty[] | null {
-  if (hasUtilityRoot(utility, 'inset-y')) return ['top', 'bottom']
-  if (hasUtilityRoot(utility, 'inset-x')) return ['left', 'right']
-  if (hasUtilityRoot(utility, 'inset-s')) return ['inlineStart']
-  if (hasUtilityRoot(utility, 'inset-e')) return ['inlineEnd']
-  if (hasUtilityRoot(utility, 'inset-bs')) return ['blockStart']
-  if (hasUtilityRoot(utility, 'inset-be')) return ['blockEnd']
-  if (hasUtilityRoot(utility, 'inset')) return ['top', 'bottom', 'left', 'right']
+  if (hasUtilityRoot(utility, 'inset-y')) return knownOffset(utility.slice(8), ['top', 'bottom'])
+  if (hasUtilityRoot(utility, 'inset-x')) return knownOffset(utility.slice(8), ['left', 'right'])
+  if (hasUtilityRoot(utility, 'inset-s')) return knownOffset(utility.slice(8), ['inlineStart'])
+  if (hasUtilityRoot(utility, 'inset-e')) return knownOffset(utility.slice(8), ['inlineEnd'])
+  if (hasUtilityRoot(utility, 'inset-bs')) return knownOffset(utility.slice(9), ['blockStart'])
+  if (hasUtilityRoot(utility, 'inset-be')) return knownOffset(utility.slice(9), ['blockEnd'])
+  if (hasUtilityRoot(utility, 'inset')) return knownOffset(utility.slice(6), ['top', 'bottom', 'left', 'right'])
   const root = utilityRoot(utility)
-  if (root == null) return null
+  const value = utilityValue(utility)
+  if (root == null || value == null || !isKnownTailwindLength(value)) return null
   switch (root) {
     case 'top':
     case 'bottom':
@@ -152,6 +163,62 @@ function offsetUtilityProperties(utility: string): OffsetProperty[] | null {
     case 'start': return ['inlineStart']
     case 'end': return ['inlineEnd']
     default: return null
+  }
+}
+
+function knownOffset(value: string, properties: OffsetProperty[]): OffsetProperty[] | null {
+  return isKnownTailwindLength(value) ? properties : null
+}
+
+function isKnownTailwindLength(value: string): boolean {
+  return /^\d+(\.\d+)?$/.test(value)
+    || /^\d+\/\d+$/.test(value)
+    || value === 'px'
+    || value === 'auto'
+    || value === 'full'
+    || (value.startsWith('[') && value.endsWith(']'))
+}
+
+function unmodeledResemblance(utility: string): 'offset' | 'spacing' | 'other' {
+  const root = utilityRoot(utility)
+  switch (root) {
+    case 'top':
+    case 'bottom':
+    case 'left':
+    case 'right':
+    case 'start':
+    case 'end':
+    case 'inset':
+    case 'inset-x':
+    case 'inset-y':
+    case 'inset-s':
+    case 'inset-e':
+    case 'inset-bs':
+    case 'inset-be': return 'offset'
+    case 'm':
+    case 'mt':
+    case 'mb':
+    case 'ml':
+    case 'mr':
+    case 'mx':
+    case 'my':
+    case 'ms':
+    case 'me':
+    case 'p':
+    case 'pt':
+    case 'pb':
+    case 'pl':
+    case 'pr':
+    case 'px':
+    case 'py':
+    case 'ps':
+    case 'pe':
+    case 'gap':
+    case 'gap-x':
+    case 'gap-y':
+    case 'space-x':
+    case 'space-y': return 'spacing'
+    default: return 'other'
   }
 }
 

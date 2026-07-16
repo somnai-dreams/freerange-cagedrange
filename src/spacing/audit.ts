@@ -45,6 +45,7 @@ function auditElement(element: LoweredSpacingElement): SpacingElementAudit {
 
 function classFactDeclaration(classFact: ClassFact): SpacingDeclaration[] {
   switch (classFact.kind) {
+    case 'unmodeled':
     case 'position': return []
     case 'offset':
       return [{
@@ -78,12 +79,29 @@ function ownershipFindings(
   const inlineOwned = element.inlineDeclarations.filter(declaration =>
     declaration.kind === 'offset' || declaration.kind === 'margin')
   const inlineOffsets = inlineOwned.filter(declaration => declaration.kind === 'offset')
+  const unmodeledClasses = element.classes.possibleClasses.filter(classFact =>
+    classFact.kind === 'unmodeled' && classFact.target === 'self')
+  const suspiciousClass = unmodeledClasses.find(classFact =>
+    classFact.kind === 'unmodeled' && classFact.resembles !== 'other')
+  if (suspiciousClass?.kind === 'unmodeled' && inlineOwned.length > 0) {
+    coverageReasons.push({kind: 'unmodeledClass', className: suspiciousClass.token})
+  }
 
   let noPositionFinding: SpacingOwnershipFinding | null = null
   for (const inlineOffset of inlineOffsets) {
     const result = offsetPositionResult(element, inlineOffset)
     if (result === 'ambiguous') {
       coverageReasons.push({kind: 'uncorrelatedPositionAndOffset'})
+      continue
+    }
+    const hasModeledPosition = element.classes.possibleClasses.some(classFact => classFact.kind === 'position')
+    if (result === 'finding'
+      && element.inlinePosition == null
+      && !hasModeledPosition
+      && unmodeledClasses.length > 0) {
+      const unmodeledClass = unmodeledClasses[0]!
+      if (unmodeledClass.kind !== 'unmodeled') throw new Error('Expected an unmodeled class')
+      coverageReasons.push({kind: 'unmodeledClass', className: unmodeledClass.token})
       continue
     }
     if (result !== 'finding' || noPositionFinding != null) continue

@@ -60,6 +60,19 @@ test('an inline offset on an element with no CSS position is dead and reported',
   ])
 })
 
+test('an unmodeled class makes position absence partial coverage', () => {
+  const result = scanElements('<div className="wm-snap-preview" style={{top: y, left: x}}/>')
+  expect(result.details).toEqual([])
+  expect(result.limitedCoverage).toEqual([{
+    kind: 'partial',
+    reasons: [{kind: 'unmodeledClass', className: 'wm-snap-preview'}],
+  }])
+
+  expect(scanElements(`<div className="wm-snap-preview" style={{position: 'static', top: y}}/>`).details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
+  ])
+})
+
 test('an explicit static class is named in the finding', () => {
   expect(scanElements('<div className="static" style={{top: y}}/>').details).toEqual([
     {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: 'static'},
@@ -575,10 +588,13 @@ test('the class attribute name works like className', () => {
   ])
 })
 
-test('a custom class sharing a utility root is a known false positive', () => {
-  expect(scanElements('<div className="absolute top-level-nav" style={{top: y}}/>').details).toEqual([
-    {kind: 'offsetClassOnOwnedProperty', property: 'top', styleProperty: 'top', className: 'top-level-nav'},
-  ])
+test('a custom class sharing a utility root is not assumed to be Tailwind', () => {
+  const result = scanElements('<div className="absolute top-level-nav" style={{top: y}}/>')
+  expect(result.details).toEqual([])
+  expect(result.limitedCoverage).toEqual([{
+    kind: 'partial',
+    reasons: [{kind: 'unmodeledClass', className: 'top-level-nav'}],
+  }])
 })
 
 test('findings carry the element position and sort by document order', () => {
