@@ -28,9 +28,11 @@ export function loadCheckedTypeScriptProjectGraph(configPath: string): TypeScrip
   return loadProjectGraph(configPath, true)
 }
 
-// Syntax consumers use the same Programs and SourceFiles as project discovery. They do
-// not request a checker or diagnostics, and unlike the checked analyzer they accept a
-// project without strict null checks.
+// Syntax-first consumers use the same Programs and SourceFiles as project discovery.
+// They never request diagnostics, so files with type errors still analyze, and unlike
+// the checked analyzer they accept a project without strict null checks. A consumer may
+// still ask the Program for a checker: the layout evaluator reads literal-union types
+// to decide branch reachability.
 export function loadSyntaxTypeScriptProjectGraph(configPath: string): TypeScriptProjectGraph {
   return loadProjectGraph(configPath, false)
 }

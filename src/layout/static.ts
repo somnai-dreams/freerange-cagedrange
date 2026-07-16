@@ -1,6 +1,7 @@
 import {existsSync} from 'node:fs'
 import {relative, resolve} from 'node:path'
 import * as ts from 'typescript'
+import {evalMention, typeCheckSuppressionMention} from '../lower/accept.ts'
 import {
   findProjectSource,
   findTypeScriptConfig,
@@ -88,6 +89,16 @@ function auditSourceConstraint(
   target: StaticLayoutTarget,
   configDirectory: string,
 ): StaticLayoutCheck {
+  // Branch reachability rests on the checker's word, so the numeric analyzer's file-wide
+  // trust rules apply to the marked file: a type-check suppression can put a wrong value
+  // behind any declared type, and an eval string can rewrite the bindings constants are
+  // followed through. Either one could prune a reachable alternative into a false pass.
+  if (typeCheckSuppressionMention(projectSource.sourceFile) != null) {
+    return unknownCheck(constraint, target, {kind: 'sourceSuppressesTypeChecking', file: target.source.file})
+  }
+  if (evalMention(projectSource.sourceFile) != null) {
+    return unknownCheck(constraint, target, {kind: 'sourceMentionsEval', file: target.source.file})
+  }
   const matches = findMarkedElements(projectSource.sourceFile, target.source.marker)
   if (matches.length === 0) {
     return unknownCheck(constraint, target, {kind: 'sourceMarkerMissing', marker: target.source.marker})
@@ -1745,6 +1756,12 @@ function booleanDependencies(
 }
 
 function literalDomain(expression: ts.Expression, checker: ts.TypeChecker): Array<string | number | boolean> | null {
+  // The checker's answer at an assertion node is the asserted type — exactly where its
+  // word and the runtime value may diverge. Query the operand instead, so the domain
+  // always comes from a declared or flow-narrowed type.
+  for (let peeled = peelTransparentExpression(expression); peeled !== expression; peeled = peelTransparentExpression(expression)) {
+    expression = peeled
+  }
   const type = checker.getTypeAtLocation(expression)
   const members = type.isUnion() ? type.types : [type]
   const values: Array<string | number | boolean> = []

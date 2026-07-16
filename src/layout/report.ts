@@ -53,6 +53,10 @@ function formatStaticUnknown(reason: StaticLayoutUnknownReason): string {
     case 'typescriptProjectMissing': return 'no tsconfig.json was found for the source target'
     case 'sourceFileMissing': return `source file '${reason.file}' does not exist`
     case 'sourceFileOutsideProject': return `source file '${reason.file}' is outside the resolved TypeScript project`
+    case 'sourceSuppressesTypeChecking':
+      return `source file '${reason.file}' contains @ts-nocheck, @ts-ignore, or @ts-expect-error, so its types cannot be trusted`
+    case 'sourceMentionsEval':
+      return `source file '${reason.file}' mentions eval, so its bindings and types cannot be trusted`
     case 'sourceMarkerMissing': return `source marker '${reason.marker}' was not found`
     case 'sourceMarkerMatchedMultiple':
       return `source marker '${reason.marker}' matched ${reason.count} intrinsic elements; exactly one is required`

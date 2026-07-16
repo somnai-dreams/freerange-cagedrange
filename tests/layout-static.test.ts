@@ -791,3 +791,132 @@ test('fr --layout finds the project config and gates intrinsic block-size failur
     rmSync(directory, {recursive: true, force: true})
   }
 })
+
+test('a type-check suppression directive makes the marked file unknown', () => {
+  const suppressed = project(`
+// @ts-nocheck
+export function Composer() {
+  return <div data-fr-layout="composer" style={{height: 52}} />
+}
+`)
+  try {
+    expect(suppressed.audit.checks[0]).toMatchObject({
+      kind: 'unknown',
+      reason: {kind: 'sourceSuppressesTypeChecking', file: 'Composer.tsx'},
+    })
+    expect(formatStaticLayoutReport(suppressed.audit)).toContain(
+      'contains @ts-nocheck, @ts-ignore, or @ts-expect-error, so its types cannot be trusted',
+    )
+  } finally {
+    rmSync(suppressed.directory, {recursive: true, force: true})
+  }
+
+  const interior = project(`
+export function Composer() {
+  // @ts-expect-error legacy value shape
+  const width: number = 'wide'
+  void width
+  return <div data-fr-layout="composer" style={{height: 52}} />
+}
+`)
+  try {
+    expect(interior.audit.checks[0]).toMatchObject({
+      kind: 'unknown',
+      reason: {kind: 'sourceSuppressesTypeChecking', file: 'Composer.tsx'},
+    })
+  } finally {
+    rmSync(interior.directory, {recursive: true, force: true})
+  }
+
+  const quoted = project(`
+export function Composer() {
+  const note = 'ask before adding @ts-ignore anywhere'
+  return <div data-fr-layout="composer" style={{height: 52}} title={note} />
+}
+`)
+  try {
+    expect(quoted.audit.checks[0]).toMatchObject({kind: 'pass', minimumPx: 52, maximumPx: 52})
+  } finally {
+    rmSync(quoted.directory, {recursive: true, force: true})
+  }
+})
+
+test('an eval mention makes the marked file unknown', () => {
+  const evalUser = project(`
+const compute = eval
+export function Composer() {
+  return <div data-fr-layout="composer" style={{height: 52}} />
+}
+`)
+  try {
+    expect(evalUser.audit.checks[0]).toMatchObject({
+      kind: 'unknown',
+      reason: {kind: 'sourceMentionsEval', file: 'Composer.tsx'},
+    })
+    expect(formatStaticLayoutReport(evalUser.audit)).toContain(
+      'mentions eval, so its bindings and types cannot be trusted',
+    )
+  } finally {
+    rmSync(evalUser.directory, {recursive: true, force: true})
+  }
+})
+
+test('a type assertion in a branch condition cannot prune an alternative', () => {
+  const asserted = project(`
+export function Composer({mode}: {mode: 'compact' | 'tall'}) {
+  return <div data-fr-layout="composer">
+    {(mode as 'compact') === 'compact'
+      ? <div style={{height: 52}} />
+      : <div style={{height: 60}} />}
+  </div>
+}
+`)
+  try {
+    expect(asserted.audit.checks[0]).toMatchObject({kind: 'fail', witnessMinimumPx: 60})
+  } finally {
+    rmSync(asserted.directory, {recursive: true, force: true})
+  }
+
+  const plain = project(`
+export function Composer({mode}: {mode: 'compact' | 'tall'}) {
+  return <div data-fr-layout="composer">
+    {mode === 'compact'
+      ? <div style={{height: 52}} />
+      : <div style={{height: 60}} />}
+  </div>
+}
+`)
+  try {
+    expect(plain.audit.checks[0]).toMatchObject({kind: 'fail', witnessMinimumPx: 60})
+  } finally {
+    rmSync(plain.directory, {recursive: true, force: true})
+  }
+
+  const nonNull = project(`
+export function Composer({mode}: {mode?: 'compact' | 'tall'}) {
+  return <div data-fr-layout="composer">
+    {mode! === 'compact'
+      ? <div style={{height: 52}} />
+      : <div style={{height: 60}} />}
+  </div>
+}
+`)
+  try {
+    expect(nonNull.audit.checks[0]).toMatchObject({kind: 'unknown'})
+  } finally {
+    rmSync(nonNull.directory, {recursive: true, force: true})
+  }
+})
+
+test('a cast around a literal still evaluates by its syntax', () => {
+  const {directory, audit} = project(`
+export function Composer() {
+  return <div data-fr-layout="composer" style={{height: 52 as number, paddingTop: 0 as const}} />
+}
+`)
+  try {
+    expect(audit.checks[0]).toMatchObject({kind: 'pass', minimumPx: 52, maximumPx: 52})
+  } finally {
+    rmSync(directory, {recursive: true, force: true})
+  }
+})

@@ -34,6 +34,8 @@ export type StaticLayoutUnknownReason =
   | {kind: 'typescriptProjectMissing'}
   | {kind: 'sourceFileMissing'; file: string}
   | {kind: 'sourceFileOutsideProject'; file: string}
+  | {kind: 'sourceSuppressesTypeChecking'; file: string}
+  | {kind: 'sourceMentionsEval'; file: string}
   | {kind: 'sourceMarkerMissing'; marker: string}
   | {kind: 'sourceMarkerMatchedMultiple'; marker: string; count: number}
   | {kind: 'unsupportedSource'; reasons: string[]}
