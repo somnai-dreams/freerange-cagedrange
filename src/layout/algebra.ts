@@ -63,7 +63,6 @@ type AffineAtom = {
 type AffineExpression = {
   constant: number
   atoms: AffineAtom[]
-  reasons: string[]
 }
 
 const maximumProofAlternatives = 64
@@ -113,7 +112,10 @@ export function layoutAdd(...expressions: LayoutExpression[]): LayoutExpression 
       else values.push(term)
     }
   }
-  finiteNumber(constant, 'layout sum')
+  // Two individually valid constants can overflow float64 when folded. The sum is then
+  // not representable, so the result degrades to an unknown value instead of throwing —
+  // a prover that builds `left - right` internally must never crash on valid operands.
+  if (!Number.isFinite(constant)) return layoutUnknown('layout sum overflows representable pixels')
   values.sort((left, right) => expressionKey(left).localeCompare(expressionKey(right)))
   if (constant !== 0 || values.length === 0) values.push(layoutConstant(constant))
   if (values.length === 1) return values[0]!
@@ -124,8 +126,16 @@ export function layoutScale(factor: number, expression: LayoutExpression): Layou
   finiteNumber(factor, 'layout scale')
   if (factor === 0) return layoutConstant(0)
   if (factor === 1) return expression
-  if (expression.kind === 'constant') return layoutConstant(factor * expression.value)
-  if (expression.kind === 'scale') return layoutScale(factor * expression.factor, expression.value)
+  if (expression.kind === 'constant') {
+    const folded = factor * expression.value
+    if (!Number.isFinite(folded)) return layoutUnknown('layout scale overflows representable pixels')
+    return layoutConstant(folded)
+  }
+  if (expression.kind === 'scale') {
+    const folded = factor * expression.factor
+    if (!Number.isFinite(folded)) return layoutUnknown('layout scale overflows representable pixels')
+    return layoutScale(folded, expression.value)
+  }
   return {kind: 'scale', factor, value: expression}
 }
 
@@ -293,7 +303,6 @@ function proveSingleEquality(
     }
   }
   const reasons = uniqueStrings([
-    ...affine.reasons,
     ...collectUnknownReasons(left),
     ...collectUnknownReasons(right),
     'layout difference is not bounded within the tolerance',
@@ -306,23 +315,31 @@ function proveSingleEquality(
   }
 }
 
+// Cancellation is only sound when equal keys imply equal runtime values. Symbols are
+// correlated by name (the same name means the same measured quantity), so a choice-free
+// and opaque-free subtree cancels structurally. A choice picks one member per resolution
+// and an opaque stands for one unknown value per producer, so two structurally identical
+// but independently built subtrees containing either may resolve differently — those
+// atoms key by node identity instead: the same node cancels exactly, a copy never does.
+function atomKey(expression: LayoutExpression): string {
+  return containsChoice(expression) || containsOpaque(expression)
+    ? `${expression.kind}#${nodeIdentity(expression)}`
+    : expressionKey(expression)
+}
+
 function affineExpression(expression: LayoutExpression): AffineExpression {
   switch (expression.kind) {
-    case 'constant': return {constant: expression.value, atoms: [], reasons: []}
+    case 'constant': return {constant: expression.value, atoms: []}
     case 'sum': return expression.values.reduce<AffineExpression>((affine, value) =>
-      addAffine(affine, affineExpression(value)), {constant: 0, atoms: [], reasons: []})
+      addAffine(affine, affineExpression(value)), {constant: 0, atoms: []})
     case 'scale': return scaleAffine(expression.factor, affineExpression(expression.value))
-    case 'opaque': return {constant: 0, atoms: [], reasons: expression.reasons}
-    case 'choice': return {constant: 0, atoms: [], reasons: ['layout alternatives require correlation']}
-    default: {
-      const reasons = collectUnknownReasons(expression)
-      return reasons.length > 0
-        ? {constant: 0, atoms: [], reasons}
-        : {
-            constant: 0,
-            atoms: [{key: expressionKey(expression), expression, coefficient: 1}],
-            reasons: [],
-          }
+    case 'opaque':
+    case 'choice':
+    case 'symbol':
+    case 'minimum':
+    case 'maximum': return {
+      constant: 0,
+      atoms: [{key: atomKey(expression), expression, coefficient: 1}],
     }
   }
 }
@@ -337,7 +354,6 @@ function addAffine(left: AffineExpression, right: AffineExpression): AffineExpre
   return {
     constant: left.constant + right.constant,
     atoms: atoms.filter(atom => atom.coefficient !== 0).sort((a, b) => a.key.localeCompare(b.key)),
-    reasons: uniqueStrings([...left.reasons, ...right.reasons]),
   }
 }
 
@@ -345,7 +361,6 @@ function scaleAffine(factor: number, affine: AffineExpression): AffineExpression
   return {
     constant: affine.constant * factor,
     atoms: affine.atoms.map(atom => ({...atom, coefficient: atom.coefficient * factor})),
-    reasons: affine.reasons,
   }
 }
 
@@ -358,7 +373,6 @@ function affineRange(affine: AffineExpression): LayoutExpressionRange {
   for (const atom of affine.atoms) {
     range = addRanges(range, scaleRange(atom.coefficient, layoutExpressionRange(atom.expression)))
   }
-  if (affine.reasons.length > 0) return {minimum: null, maximum: null}
   return range
 }
 
@@ -384,6 +398,11 @@ function expandChoices(expression: LayoutExpression, limit: number): LayoutExpre
   }
 }
 
+// Repeated occurrences of the same choice node expand independently here, so a mixed
+// pick fabricates a value the expression cannot take. That stays sound for the verdicts
+// this expansion feeds: subtractive repeats already cancelled in the affine pass, and a
+// positive repeat's mixed picks lie between the true extremes, so inside any tolerance
+// interval the extremes satisfy and outside none they violate.
 function expandCombination(
   expressions: LayoutExpression[],
   limit: number,
@@ -413,6 +432,33 @@ function containsChoice(expression: LayoutExpression): boolean {
   }
 }
 
+function containsOpaque(expression: LayoutExpression): boolean {
+  switch (expression.kind) {
+    case 'opaque': return true
+    case 'sum':
+    case 'minimum':
+    case 'maximum':
+    case 'choice': return expression.values.some(containsOpaque)
+    case 'scale': return containsOpaque(expression.value)
+    default: return false
+  }
+}
+
+// Node identities support reference-keyed atoms: the number is unique per expression
+// object for the program's life, so the same node always gets the same key and two
+// structurally identical nodes never share one.
+const nodeIdentities = new WeakMap<LayoutExpression, number>()
+let nextNodeIdentity = 1
+
+function nodeIdentity(expression: LayoutExpression): number {
+  const existing = nodeIdentities.get(expression)
+  if (existing != null) return existing
+  const identity = nextNodeIdentity
+  nextNodeIdentity += 1
+  nodeIdentities.set(expression, identity)
+  return identity
+}
+
 function collectUnknownReasons(expression: LayoutExpression): string[] {
   switch (expression.kind) {
     case 'opaque': return expression.reasons
@@ -425,24 +471,41 @@ function collectUnknownReasons(expression: LayoutExpression): string[] {
   }
 }
 
+// The serialization is JSON so it is injective: symbol names and opaque reasons are
+// caller strings that may contain any delimiter (a CSS selector is an ordinary symbol
+// name), and JSON escaping keeps two different trees from ever sharing a key.
 function expressionKey(expression: LayoutExpression): string {
+  return JSON.stringify(expressionKeyData(expression))
+}
+
+function expressionKeyData(expression: LayoutExpression): unknown {
   switch (expression.kind) {
-    case 'constant': return `constant:${expression.value}`
-    case 'symbol': return `symbol:${expression.name}:${expression.minimum}:${expression.maximum}`
-    case 'opaque': return `opaque:${expression.minimum}:${expression.maximum}:${expression.reasons.join('|')}`
-    case 'scale': return `scale:${expression.factor}:${expressionKey(expression.value)}`
+    case 'constant': return ['constant', expression.value]
+    case 'symbol': return ['symbol', expression.name, expression.minimum, expression.maximum]
+    case 'opaque': return ['opaque', expression.minimum, expression.maximum, expression.reasons]
+    case 'scale': return ['scale', expression.factor, expressionKeyData(expression.value)]
     case 'sum':
     case 'minimum':
     case 'maximum':
-    case 'choice': return `${expression.kind}:${expression.values.map(expressionKey).join(',')}`
+    case 'choice': return [expression.kind, ...expression.values.map(expressionKeyData)]
   }
 }
 
+// Structural deduplication is only sound for values whose structure decides their value.
+// A member containing a choice or an opaque may resolve differently from an identically
+// built copy, and dropping the copy would also let the survivor's node identity stand in
+// for both, so such members always stay.
 function uniqueExpressions(expressions: LayoutExpression[]): LayoutExpression[] {
   const values: LayoutExpression[] = []
   for (const expression of expressions) {
+    if (containsChoice(expression) || containsOpaque(expression)) {
+      values.push(expression)
+      continue
+    }
     const key = expressionKey(expression)
-    if (!values.some(value => expressionKey(value) === key)) values.push(expression)
+    if (!values.some(value => !containsChoice(value) && !containsOpaque(value) && expressionKey(value) === key)) {
+      values.push(expression)
+    }
   }
   values.sort((left, right) => expressionKey(left).localeCompare(expressionKey(right)))
   return values

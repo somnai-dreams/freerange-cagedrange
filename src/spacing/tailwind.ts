@@ -49,6 +49,7 @@ export function parseTailwindClass(rawToken: string): ClassFact | null {
 
   const parsed = parseSpacingUtility(utility)
   if (parsed == null) {
+    if (dialectInertUtility(utility)) return null
     return {kind: 'unmodeled', token: rawToken, target, condition, resembles: unmodeledResemblance(utility)}
   }
   return {
@@ -179,7 +180,35 @@ function isKnownTailwindLength(value: string): boolean {
     || (value.startsWith('[') && value.endsWith(']'))
 }
 
+// Utilities the dialect recognizes that carry no ownership fact: an auto margin is
+// alignment rather than a spacing amount, and the space-*-reverse switches only flip
+// which sibling receives the existing space. Treating them as unmodeled would falsely
+// claim that external CSS may be involved and would stand real findings down.
+function dialectInertUtility(utility: string): boolean {
+  if (utility === 'space-x-reverse' || utility === 'space-y-reverse') return true
+  if (utilityValue(utility) !== 'auto') return false
+  switch (utilityRoot(utility)) {
+    case 'm':
+    case 'mt':
+    case 'mb':
+    case 'ml':
+    case 'mr':
+    case 'mx':
+    case 'my':
+    case 'ms':
+    case 'me': return true
+    default: return false
+  }
+}
+
+// A root is read up to the first dash, so the multi-segment families are matched on the
+// whole utility first; 'space-y-huge' resembles spacing even though its first segment
+// alone matches nothing.
 function unmodeledResemblance(utility: string): 'offset' | 'spacing' | 'other' {
+  if (hasUtilityRoot(utility, 'inset')) return 'offset'
+  if (hasUtilityRoot(utility, 'gap')
+    || hasUtilityRoot(utility, 'space-x')
+    || hasUtilityRoot(utility, 'space-y')) return 'spacing'
   const root = utilityRoot(utility)
   switch (root) {
     case 'top':
@@ -187,14 +216,7 @@ function unmodeledResemblance(utility: string): 'offset' | 'spacing' | 'other' {
     case 'left':
     case 'right':
     case 'start':
-    case 'end':
-    case 'inset':
-    case 'inset-x':
-    case 'inset-y':
-    case 'inset-s':
-    case 'inset-e':
-    case 'inset-bs':
-    case 'inset-be': return 'offset'
+    case 'end': return 'offset'
     case 'm':
     case 'mt':
     case 'mb':
@@ -212,12 +234,7 @@ function unmodeledResemblance(utility: string): 'offset' | 'spacing' | 'other' {
     case 'px':
     case 'py':
     case 'ps':
-    case 'pe':
-    case 'gap':
-    case 'gap-x':
-    case 'gap-y':
-    case 'space-x':
-    case 'space-y': return 'spacing'
+    case 'pe': return 'spacing'
     default: return 'other'
   }
 }

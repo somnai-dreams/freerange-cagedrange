@@ -963,3 +963,48 @@ test('fr --spacing follows imports without type-checking and excludes non-projec
     rmSync(directory, {recursive: true, force: true})
   }
 })
+
+test('an auto margin is dialect-recognized and cannot stand a dead offset down', () => {
+  const result = scanElements('<div className="mx-auto" style={{top: y}}/>')
+  expect(result.details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: null},
+  ])
+  expect(result.limitedCoverage).toEqual([])
+})
+
+test('a reverse space switch is dialect-recognized, not unmodeled', () => {
+  const result = scanElements('<div className="space-y-4 space-y-reverse" style={{marginTop: y}}/>')
+  expect(result.limitedCoverage).toEqual([])
+})
+
+test('a pseudo-element or variant position does not bypass the unmodeled-class stand-down', () => {
+  const pseudo = scanElements('<div className="before:absolute custom-panel" style={{top: y}}/>')
+  expect(pseudo.details).toEqual([])
+  expect(pseudo.limitedCoverage).toEqual([{
+    kind: 'partial',
+    reasons: [{kind: 'unmodeledClass', className: 'custom-panel'}],
+  }])
+
+  const variant = scanElements('<div className="md:absolute custom-panel" style={{top: y}}/>')
+  expect(variant.details).toEqual([])
+  expect(variant.limitedCoverage).toEqual([{
+    kind: 'partial',
+    reasons: [{kind: 'unmodeledClass', className: 'custom-panel'}],
+  }])
+})
+
+test('an explicit static class keeps the dead-offset finding past an unmodeled class', () => {
+  const result = scanElements('<div className="static custom-panel" style={{top: y}}/>')
+  expect(result.details).toEqual([
+    {kind: 'offsetWithoutPosition', styleProperty: 'top', positionClass: 'static'},
+  ])
+})
+
+test('a custom multi-segment spacing name limits coverage instead of vanishing', () => {
+  const result = scanElements('<div className="space-y-huge" style={{marginTop: y}}/>')
+  expect(result.details).toEqual([])
+  expect(result.limitedCoverage).toEqual([{
+    kind: 'partial',
+    reasons: [{kind: 'unmodeledClass', className: 'space-y-huge'}],
+  }])
+})

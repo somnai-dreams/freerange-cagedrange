@@ -7,8 +7,10 @@ import {
   layoutColumnBlockSize,
   layoutConstant,
   layoutMaximum,
+  layoutMinimum,
   layoutOpaque,
   layoutRowBlockSize,
+  layoutScale,
   layoutSymbol,
   layoutUnknown,
   proveLayoutEquality,
@@ -164,6 +166,51 @@ describe('source-independent layout algebra', () => {
 
     expect(proveLayoutEquality(layoutSymbol('component.blockSize', {minimum: 52, maximum: 52}), px(52)))
       .toMatchObject({kind: 'proven'})
+  })
+
+  test('independent alternatives never cancel, even wrapped in a selection', () => {
+    const leftMax = layoutMaximum(px(0), layoutChoice(px(40), px(80)))
+    const rightMax = layoutMaximum(px(0), layoutChoice(px(40), px(80)))
+    const maxProof = proveLayoutEquality(leftMax, rightMax)
+    expect(maxProof).toMatchObject({kind: 'unknown'})
+    expect(maxProof.kind === 'unknown' ? maxProof.reasons : []).toContain(
+      'alternatives on both sides cannot be correlated',
+    )
+    expect(proveLayoutEquality(
+      layoutMinimum(layoutChoice(px(40), px(80)), px(100)),
+      layoutMinimum(layoutChoice(px(40), px(80)), px(100)),
+    )).toMatchObject({kind: 'unknown'})
+  })
+
+  test('the same alternative node cancels exactly while a copy stays independent', () => {
+    const choice = layoutChoice(px(40), px(80))
+    expect(proveLayoutEquality(layoutAdd(choice, px(8), layoutScale(-1, choice)), px(8)))
+      .toMatchObject({kind: 'proven', minimumDelta: 0, maximumDelta: 0})
+    const shared = layoutMaximum(px(0), choice)
+    expect(proveLayoutEquality(layoutAdd(shared, px(4)), layoutAdd(shared, px(4))))
+      .toMatchObject({kind: 'proven', minimumDelta: 0, maximumDelta: 0})
+  })
+
+  test('equal opaque descriptions never cancel; the same opaque node does', () => {
+    const measured = layoutOpaque({minimum: 10, maximum: 20}, 'measured header')
+    const lookalike = layoutOpaque({minimum: 10, maximum: 20}, 'measured header')
+    expect(proveLayoutEquality(measured, lookalike)).toMatchObject({kind: 'unknown'})
+    expect(proveLayoutEquality(layoutAdd(measured, px(4)), layoutAdd(measured, px(4))))
+      .toMatchObject({kind: 'proven', minimumDelta: 0, maximumDelta: 0})
+  })
+
+  test('symbol names containing key delimiters never collide', () => {
+    expect(proveLayoutEquality(
+      layoutMaximum(layoutSymbol('a:null:null,symbol:b'), layoutSymbol('c')),
+      layoutMaximum(layoutSymbol('a'), layoutSymbol('b:null:null,symbol:c')),
+    )).toMatchObject({kind: 'unknown'})
+  })
+
+  test('a folded overflow degrades to an unknown value instead of throwing', () => {
+    expect(proveLayoutEquality(px(-Number.MAX_VALUE), px(Number.MAX_VALUE), 0.25))
+      .toMatchObject({kind: 'unknown'})
+    expect(layoutAdd(px(1e308), px(1e308))).toMatchObject({kind: 'opaque'})
+    expect(layoutScale(1e308, px(1e308))).toMatchObject({kind: 'opaque'})
   })
 
   test('rejects malformed public values at their construction boundary', () => {

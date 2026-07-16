@@ -1,7 +1,9 @@
 import {describe, expect, test} from 'bun:test'
 import {
   layoutAdd,
+  layoutChoice,
   layoutConstant,
+  layoutMaximum,
   layoutSymbol,
   proveLayoutAlignment,
   type LayoutMeasurementConstraint,
@@ -57,5 +59,13 @@ describe('shared layout constraints', () => {
     expect(() => proveLayoutAlignment([] as never, 0.5)).toThrow(
       'layout alignment requires at least two expressions',
     )
+  })
+
+  test('independently conditional members never align by structural similarity', () => {
+    const sibling = () => layoutMaximum(
+      layoutConstant(0),
+      layoutChoice(layoutConstant(40), layoutConstant(80)),
+    )
+    expect(proveLayoutAlignment([sibling(), sibling()], 0).kind).toBe('unknown')
   })
 })

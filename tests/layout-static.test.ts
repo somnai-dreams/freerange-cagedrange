@@ -1027,3 +1027,66 @@ export function Composer() {
     rmSync(directory, {recursive: true, force: true})
   }
 })
+
+test('conditional margins cannot pass by dropping the taller branch margin', () => {
+  const conditional = project(`
+export function Composer({flag}: {flag: boolean}) {
+  return <div data-fr-layout="composer" className="flex flex-col">
+    {flag
+      ? <div className="mt-2" style={{height: 16}} />
+      : <div style={{height: 16}} />}
+  </div>
+}
+`, '', 16)
+  try {
+    expect(conditional.audit.checks[0]).toMatchObject({kind: 'unknown', minimumPx: 16, maximumPx: 24})
+    expect(formatStaticLayoutReport(conditional.audit)).toContain(
+      'conditional margins select with their branch',
+    )
+  } finally {
+    rmSync(conditional.directory, {recursive: true, force: true})
+  }
+
+  const control = project(`
+export function Composer() {
+  return <div data-fr-layout="composer" className="flex flex-col">
+    <div className="mt-2" style={{height: 16}} />
+  </div>
+}
+`, '', 16)
+  try {
+    expect(control.audit.checks[0]).toMatchObject({kind: 'fail', witnessMinimumPx: 24})
+  } finally {
+    rmSync(control.directory, {recursive: true, force: true})
+  }
+})
+
+test('an unproven class alternative differing only in flex wrapping stays unknown', () => {
+  const {directory, audit} = project(`
+declare function isCompact(): boolean
+export function Composer() {
+  return <div data-fr-layout="composer" className={isCompact() ? 'flex flex-wrap' : 'flex'}>
+    <div style={{height: 40}} />
+    <div style={{height: 80}} />
+  </div>
+}
+`, '', 200)
+  try {
+    expect(audit.checks[0]).toMatchObject({kind: 'unknown'})
+  } finally {
+    rmSync(directory, {recursive: true, force: true})
+  }
+})
+
+test('a non-finite numeric literal is outside the subset rather than a crash', () => {
+  const {directory, audit} = project(`
+export function Composer() {
+  return <div data-fr-layout="composer" style={{height: 1e999}} />
+}
+`)
+  try {
+    expect(audit.checks[0]).toMatchObject({kind: 'unknown', reason: {kind: 'unsupportedSource'}})
+  } finally {
+    rmSync(directory, {recursive: true, force: true})
+  }
+})

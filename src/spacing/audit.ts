@@ -94,7 +94,12 @@ function ownershipFindings(
       coverageReasons.push({kind: 'uncorrelatedPositionAndOffset'})
       continue
     }
-    const hasModeledPosition = element.classes.possibleClasses.some(classFact => classFact.kind === 'position')
+    // Only an unconditional position fact on this element's own box makes the unmodeled
+    // classes irrelevant to the no-position warning. A pseudo-element position styles a
+    // different box, and a variant position leaves other states unpositioned, so with
+    // either one an unmodeled class could still position the element through external CSS.
+    const hasModeledPosition = element.classes.possibleClasses.some(classFact =>
+      classFact.kind === 'position' && classFact.target === 'self' && classFact.condition === 'always')
     if (result === 'finding'
       && element.inlinePosition == null
       && !hasModeledPosition

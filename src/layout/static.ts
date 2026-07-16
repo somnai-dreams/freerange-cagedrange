@@ -33,13 +33,19 @@ import type {
 const maximumAlternatives = 16
 const maximumConstantDepth = 32
 
+// A bound's own block margins stay outside its expression because only the parent knows
+// what they mean: flex items add them, block flow may collapse them. Conditional class
+// and JSX alternatives can disagree about a margin, so each margin is a range; a
+// degenerate range is the ordinary single-value case.
+type MarginRangePx = {minPx: number; maxPx: number}
+
 type Bound = {
   expression: LayoutExpression
   witnessMinimumPx: number
   evidence: StaticLayoutEvidence[]
   unknownReasons: string[]
-  marginTopPx: number
-  marginBottomPx: number
+  marginTop: MarginRangePx
+  marginBottom: MarginRangePx
   conditional: boolean
 }
 
@@ -467,8 +473,13 @@ function sourceAncestorRisk(
   return null
 }
 
+// Every fact that can change the produced bound must be in the key, unknown reasons
+// included: a class like flex-wrap contributes only an unknown reason, and two
+// alternatives that differ only there must still count as different pressure — collapsing
+// them would turn an unproven alternative into a definite claim. JSON keeps the key
+// injective; a plain join cannot tell null from an empty string.
 function blockFactsPressureKey(facts: BlockFacts): string {
-  return [
+  return JSON.stringify([
     facts.layout,
     facts.outOfFlow,
     facts.boxSizing,
@@ -482,7 +493,9 @@ function blockFactsPressureKey(facts: BlockFacts): string {
     facts.borderTopPx,
     facts.borderBottomPx,
     facts.lowerBoundReliable,
-  ].join('|')
+    [...facts.importantProperties].sort(),
+    facts.unknownReasons,
+  ])
 }
 
 function elementHiddenState(
@@ -518,9 +531,10 @@ function boundWithFacts(
   }
   const chromePx = facts.paddingTopPx + facts.paddingBottomPx + facts.borderTopPx + facts.borderBottomPx
   if (facts.heightPx != null) {
-    const height = facts.boxSizing === 'border-box'
-      ? Math.max(chromePx, clampSpecifiedSize(facts.heightPx, facts))
-      : clampSpecifiedSize(facts.heightPx, facts) + chromePx
+    const specified = clampSpecifiedExpression(layoutConstant(facts.heightPx), facts)
+    const height = sourceRange(facts.boxSizing === 'border-box'
+      ? layoutMaximum(layoutConstant(chromePx), specified)
+      : layoutAdd(specified, layoutConstant(chromePx))).minimumPx
     return {
       expression: facts.lowerBoundReliable
         ? facts.unknownReasons.length === 0
@@ -532,8 +546,8 @@ function boundWithFacts(
         ? [evidence(element, `explicit block size contributes ${pixels(height)}`, context)]
         : [],
       unknownReasons: facts.unknownReasons,
-      marginTopPx: facts.marginTopPx,
-      marginBottomPx: facts.marginBottomPx,
+      marginTop: {minPx: facts.marginTopPx, maxPx: facts.marginTopPx},
+      marginBottom: {minPx: facts.marginBottomPx, maxPx: facts.marginBottomPx},
       conditional: false,
     }
   }
@@ -562,8 +576,8 @@ function boundWithFacts(
     witnessMinimumPx,
     evidence: [...content.evidence, ...chromeEvidence],
     unknownReasons: [...content.unknownReasons, ...facts.unknownReasons],
-    marginTopPx: facts.marginTopPx,
-    marginBottomPx: facts.marginBottomPx,
+    marginTop: {minPx: facts.marginTopPx, maxPx: facts.marginTopPx},
+    marginBottom: {minPx: facts.marginBottomPx, maxPx: facts.marginBottomPx},
     conditional: content.conditional,
   }
 }
@@ -706,9 +720,16 @@ function mergeConditional(
       ...whenFalse.unknownReasons,
       ...(reachabilityProven ? [] : [reachabilityReason]),
     ],
-    marginTopPx: Math.min(whenTrue.marginTopPx, whenFalse.marginTopPx),
-    marginBottomPx: Math.min(whenTrue.marginBottomPx, whenFalse.marginBottomPx),
+    marginTop: mergeMarginRanges([whenTrue.marginTop, whenFalse.marginTop]),
+    marginBottom: mergeMarginRanges([whenTrue.marginBottom, whenFalse.marginBottom]),
     conditional: true,
+  }
+}
+
+function mergeMarginRanges(ranges: MarginRangePx[]): MarginRangePx {
+  return {
+    minPx: Math.min(...ranges.map(range => range.minPx)),
+    maxPx: Math.max(...ranges.map(range => range.maxPx)),
   }
 }
 
@@ -731,8 +752,8 @@ function crossSize(children: Bound[]): Bound {
       ...children.flatMap(child => child.unknownReasons),
       ...(correlationRisk ? [correlationReason] : []),
     ],
-    marginTopPx: 0,
-    marginBottomPx: 0,
+    marginTop: {minPx: 0, maxPx: 0},
+    marginBottom: {minPx: 0, maxPx: 0},
     conditional: children.some(child => child.conditional),
   }
 }
@@ -765,28 +786,39 @@ function stackedSize(children: Bound[]): Bound {
       ...children.flatMap(child => child.unknownReasons),
       ...(correlationRisk ? [correlationReason] : []),
     ],
-    marginTopPx: 0,
-    marginBottomPx: 0,
+    marginTop: {minPx: 0, maxPx: 0},
+    marginBottom: {minPx: 0, maxPx: 0},
     conditional: children.some(child => child.conditional),
   }
 }
 
 function blockSize(children: Bound[]): Bound {
-  if (children.length === 0) return unknownBound('auto-sized block has intrinsic content height')
-  if (children.some(child => child.marginTopPx !== 0 || child.marginBottomPx !== 0)) {
+  if (children.some(child => child.marginTop.maxPx !== 0 || child.marginBottom.maxPx !== 0)) {
     return unknownBound('block margin collapsing is outside the static layout subset')
   }
+  if (children.length === 0) return unknownBound('auto-sized block has intrinsic content height')
   return stackedSize(children)
 }
 
 function outerBound(bound: Bound): Bound {
-  const margins = bound.marginTopPx + bound.marginBottomPx
+  const minimumMarginsPx = bound.marginTop.minPx + bound.marginBottom.minPx
+  const maximumMarginsPx = bound.marginTop.maxPx + bound.marginBottom.maxPx
+  // Conditional class or JSX alternatives can put different margins on the same element.
+  // The size choice has already merged, so which margin accompanies which size is lost;
+  // an opaque margin range keeps the fold honest, and the witness keeps the smallest
+  // reachable outer size rather than pairing a branch's witness with another's margin.
+  const marginExpression = minimumMarginsPx === maximumMarginsPx
+    ? layoutConstant(minimumMarginsPx)
+    : layoutOpaque(
+        {minimum: minimumMarginsPx, maximum: maximumMarginsPx},
+        'conditional margins select with their branch',
+      )
   return {
     ...bound,
-    expression: layoutMaximum(layoutConstant(0), layoutAdd(bound.expression, layoutConstant(margins))),
-    witnessMinimumPx: Math.max(0, bound.witnessMinimumPx + margins),
-    marginTopPx: 0,
-    marginBottomPx: 0,
+    expression: layoutMaximum(layoutConstant(0), layoutAdd(bound.expression, marginExpression)),
+    witnessMinimumPx: Math.max(0, bound.witnessMinimumPx + minimumMarginsPx),
+    marginTop: {minPx: 0, maxPx: 0},
+    marginBottom: {minPx: 0, maxPx: 0},
   }
 }
 
@@ -799,8 +831,8 @@ function mergeAlternatives(alternatives: Bound[]): Bound {
     witnessMinimumPx: witness.witnessMinimumPx,
     evidence: witness.evidence,
     unknownReasons: alternatives.flatMap(alternative => alternative.unknownReasons),
-    marginTopPx: Math.min(...alternatives.map(alternative => alternative.marginTopPx)),
-    marginBottomPx: Math.min(...alternatives.map(alternative => alternative.marginBottomPx)),
+    marginTop: mergeMarginRanges(alternatives.map(alternative => alternative.marginTop)),
+    marginBottom: mergeMarginRanges(alternatives.map(alternative => alternative.marginBottom)),
     conditional: alternatives.length > 1 || alternatives.some(alternative => alternative.conditional),
   }
 }
@@ -1142,9 +1174,14 @@ function utilityLength(token: string, root: string): {matched: boolean; value: n
 }
 
 function tailwindLength(value: string): number | null {
-  if (/^\d+(?:\.\d+)?$/.test(value)) return Number(value) * 4
+  if (/^\d+(?:\.\d+)?$/.test(value)) {
+    const scaled = Number(value) * 4
+    return Number.isFinite(scaled) ? scaled : null
+  }
   const arbitrary = /^\[(\d+(?:\.\d+)?)px\]$/.exec(value)
-  return arbitrary == null ? null : Number(arbitrary[1])
+  if (arbitrary == null) return null
+  const parsed = Number(arbitrary[1])
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function applyInlineStyle(
@@ -1550,14 +1587,21 @@ function cssPixels(expression: ts.Expression, context: EvaluationContext): numbe
   const string = exactString(expression, context, 0)
   if (string == null) return null
   const match = /^(-?\d+(?:\.\d+)?)px$/.exec(string)
-  return match == null ? null : Number(match[1])
+  if (match == null) return null
+  const parsed = Number(match[1])
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function exactNumber(expression: ts.Expression, context: EvaluationContext, depth: number): number | null {
   if (depth > maximumConstantDepth) return null
   const peeled = peelTransparentExpression(expression)
   if (peeled !== expression) return exactNumber(peeled, context, depth + 1)
-  if (ts.isNumericLiteral(expression)) return Number(expression.text)
+  // A literal like 1e999 folds to Infinity; non-finite pixels are outside the subset,
+  // the same boundary the binary-operator arm below already enforces.
+  if (ts.isNumericLiteral(expression)) {
+    const parsed = Number(expression.text)
+    return Number.isFinite(parsed) ? parsed : null
+  }
   if (ts.isParenthesizedExpression(expression)) return exactNumber(expression.expression, context, depth + 1)
   if (ts.isPrefixUnaryExpression(expression)
     && (expression.operator === ts.SyntaxKind.PlusToken || expression.operator === ts.SyntaxKind.MinusToken)) {
@@ -1967,10 +2011,11 @@ function jsxLiteralAttribute(
   return null
 }
 
+// Constant inputs fold exactly through the expression constructors, so the witness
+// number derives from the same expression the proof uses; one encoding of the box
+// clamping cannot drift from the other.
 function autoOuterHeight(contentPx: number, chromePx: number, facts: BlockFacts): number {
-  return facts.boxSizing === 'border-box'
-    ? Math.max(chromePx, clampSpecifiedSize(contentPx + chromePx, facts))
-    : clampSpecifiedSize(contentPx, facts) + chromePx
+  return sourceRange(autoOuterExpression(layoutConstant(contentPx), chromePx, facts)).minimumPx
 }
 
 function autoOuterExpression(
@@ -1991,10 +2036,6 @@ function clampSpecifiedExpression(value: LayoutExpression, facts: BlockFacts): L
   return layoutMaximum(capped, layoutConstant(facts.minHeightPx))
 }
 
-function clampSpecifiedSize(value: number, facts: BlockFacts): number {
-  const capped = facts.maxHeightPx == null ? value : Math.min(value, facts.maxHeightPx)
-  return Math.max(capped, facts.minHeightPx)
-}
 
 function evidence(element: ts.Node, description: string, context: EvaluationContext): StaticLayoutEvidence {
   const sourceFile = element.getSourceFile()
@@ -2013,8 +2054,8 @@ function zeroBound(): Bound {
     witnessMinimumPx: 0,
     evidence: [],
     unknownReasons: [],
-    marginTopPx: 0,
-    marginBottomPx: 0,
+    marginTop: {minPx: 0, maxPx: 0},
+    marginBottom: {minPx: 0, maxPx: 0},
     conditional: false,
   }
 }
@@ -2026,8 +2067,8 @@ function unknownBound(reason: string | string[]): Bound {
     witnessMinimumPx: 0,
     evidence: [],
     unknownReasons: reasons,
-    marginTopPx: 0,
-    marginBottomPx: 0,
+    marginTop: {minPx: 0, maxPx: 0},
+    marginBottom: {minPx: 0, maxPx: 0},
     conditional: true,
   }
 }
