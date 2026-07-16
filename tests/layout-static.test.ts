@@ -110,6 +110,29 @@ export function Composer({showExtra}: {showExtra: boolean}) {
   }
 })
 
+test('a reachable shorter alternative reports the violating branch', () => {
+  const {directory, audit} = project(`
+export function Composer({mode}: {mode: 'expected' | 'compact'}) {
+  return <div data-fr-layout="composer" className="flex flex-col">
+    {mode === 'expected'
+      ? <div style={{height: 52}} />
+      : <div style={{height: 48}} />}
+  </div>
+}
+`)
+  try {
+    expect(audit.checks[0]).toMatchObject({
+      kind: 'fail',
+      minimumPx: 48,
+      maximumPx: 52,
+      violation: {kind: 'atMost', pixels: 48},
+    })
+    expect(formatStaticLayoutReport(audit)).toContain('reachable branch measuring at most 48px')
+  } finally {
+    rmSync(directory, {recursive: true, force: true})
+  }
+})
+
 test('a partially understood condition can still prove a reachable failure branch', () => {
   const {directory, audit} = project(`
 declare function unknownFlag(): boolean

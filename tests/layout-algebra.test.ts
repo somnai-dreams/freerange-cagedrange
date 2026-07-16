@@ -7,6 +7,7 @@ import {
   layoutColumnBlockSize,
   layoutConstant,
   layoutMaximum,
+  layoutOpaque,
   layoutRowBlockSize,
   layoutSymbol,
   layoutUnknown,
@@ -93,6 +94,10 @@ describe('source-independent layout algebra', () => {
     })
     expect(proveLayoutEquality(layoutAdd(pageStart, px(24)), layoutAdd(pageStart, px(24)), 0.5))
       .toMatchObject({kind: 'proven'})
+
+    const narrowSymbol = layoutSymbol('shared-name', {minimum: 0, maximum: 10})
+    const wideSymbol = layoutSymbol('shared-name', {minimum: 20, maximum: 30})
+    expect(proveLayoutEquality(narrowSymbol, wideSymbol)).toMatchObject({kind: 'violated'})
   })
 
   test('a reachable violating alternative fails while two-sided alternatives stay uncorrelated', () => {
@@ -147,6 +152,16 @@ describe('source-independent layout algebra', () => {
     expect(proveLayoutEquality(leftOpaqueMaximum, leftOpaqueMaximum)).toMatchObject({kind: 'proven'})
     expect(proveLayoutEquality(leftOpaqueMaximum, rightOpaqueMaximum)).toMatchObject({kind: 'unknown'})
 
+    const boundedOpaque = layoutOpaque(
+      {minimum: 54, maximum: null},
+      'the remaining intrinsic content is opaque',
+    )
+    expect(proveLayoutEquality(boundedOpaque, px(52), 0.25)).toMatchObject({
+      kind: 'violated',
+      minimumDelta: 2,
+      maximumDelta: null,
+    })
+
     expect(proveLayoutEquality(layoutSymbol('component.blockSize', {minimum: 52, maximum: 52}), px(52)))
       .toMatchObject({kind: 'proven'})
   })
@@ -157,5 +172,10 @@ describe('source-independent layout algebra', () => {
     expect(() => layoutSymbol('size', {minimum: 2, maximum: 1})).toThrow('minimum must not exceed')
     expect(() => layoutMaximum()).toThrow('layout maximum requires at least one expression')
     expect(() => proveLayoutEquality(px(1), px(1), -1)).toThrow('tolerance must not be negative')
+    expect(proveLayoutEquality(
+      layoutAdd(layoutSymbol('large-a', {minimum: 1e308, maximum: 1e308}),
+        layoutSymbol('large-b', {minimum: 1e308, maximum: 1e308})),
+      px(0),
+    )).toMatchObject({kind: 'unknown'})
   })
 })

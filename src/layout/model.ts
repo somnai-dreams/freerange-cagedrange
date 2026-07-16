@@ -57,6 +57,7 @@ export type StaticLayoutCheck =
       minimumPx: number
       maximumPx: number | null
       witnessMinimumPx: number
+      violation: {kind: 'atLeast' | 'atMost'; pixels: number}
       evidence: StaticLayoutEvidence[]
     }
   | {

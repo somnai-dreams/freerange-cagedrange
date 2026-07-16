@@ -33,9 +33,9 @@ function formatStaticCheck(check: StaticLayoutCheck): string[] {
     case 'fail': {
       const measurement = check.maximumPx != null && check.minimumPx === check.maximumPx
         ? `computes to ${pixels(check.minimumPx)}`
-        : check.maximumPx != null && check.maximumPx < check.expectedPixels - check.tolerancePx
-          ? `is at most ${pixels(check.maximumPx)}`
-          : `has a reachable branch requiring at least ${pixels(check.witnessMinimumPx)}`
+        : check.violation.kind === 'atMost'
+          ? `has a reachable branch measuring at most ${pixels(check.violation.pixels)}`
+          : `has a reachable branch requiring at least ${pixels(check.violation.pixels)}`
       const lines = [
         `  ${check.constraint}: error [layout-intrinsic-block-size]: ${measurement}; `
           + `expected ${pixels(check.expectedPixels)} ±${pixels(check.tolerancePx)}`,

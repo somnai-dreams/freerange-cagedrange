@@ -8,6 +8,18 @@ import {
   loadSyntaxTypeScriptProjectGraph,
   type ProjectSource,
 } from '../typescript/project.ts'
+import {
+  layoutAdd,
+  layoutChoice,
+  layoutConstant,
+  layoutExpressionRange,
+  layoutMaximum,
+  layoutMinimum,
+  layoutOpaque,
+  proveLayoutEquality,
+  type LayoutExpression,
+  type LayoutExpressionRange,
+} from './algebra.ts'
 import type {
   StaticLayoutAudit,
   StaticLayoutCheck,
@@ -22,8 +34,7 @@ const maximumAlternatives = 16
 const maximumConstantDepth = 32
 
 type Bound = {
-  minimumPx: number
-  maximumPx: number | null
+  expression: LayoutExpression
   witnessMinimumPx: number
   evidence: StaticLayoutEvidence[]
   unknownReasons: string[]
@@ -130,8 +141,7 @@ function auditSourceConstraint(
     ? sourceBound
     : {
         ...sourceBound,
-        minimumPx: 0,
-        maximumPx: null,
+        expression: layoutOpaque({minimum: 0, maximum: null}, ancestorRisk),
         witnessMinimumPx: 0,
         evidence: [],
         unknownReasons: [...sourceBound.unknownReasons, ancestorRisk],
@@ -141,21 +151,25 @@ function auditSourceConstraint(
     : reachability === 'conditional'
       ? {
           ...ancestryAdjusted,
-          minimumPx: 0,
-          maximumPx: null,
+          expression: layoutOpaque(
+            {minimum: 0, maximum: null},
+            'source target renders only conditionally',
+          ),
           unknownReasons: [...ancestryAdjusted.unknownReasons, 'source target renders only conditionally'],
           conditional: true,
         }
       : {
           ...ancestryAdjusted,
-          minimumPx: 0,
-          maximumPx: null,
+          expression: layoutOpaque(
+            {minimum: 0, maximum: null},
+            'source target reachability could not be proven',
+          ),
           witnessMinimumPx: 0,
           evidence: [],
           unknownReasons: [...ancestryAdjusted.unknownReasons, 'source target reachability could not be proven'],
           conditional: true,
         }
-  const lowerLimit = constraint.pixels - constraint.tolerancePx
+  const range = sourceRange(bound.expression)
   const upperLimit = constraint.pixels + constraint.tolerancePx
   if (bound.witnessMinimumPx > upperLimit) {
     return {
@@ -164,45 +178,61 @@ function auditSourceConstraint(
       target: target.name,
       expectedPixels: constraint.pixels,
       tolerancePx: constraint.tolerancePx,
-      minimumPx: bound.minimumPx,
-      maximumPx: bound.maximumPx,
+      minimumPx: range.minimumPx,
+      maximumPx: range.maximumPx,
       witnessMinimumPx: bound.witnessMinimumPx,
+      violation: {kind: 'atLeast', pixels: bound.witnessMinimumPx},
       evidence: bound.evidence,
     }
   }
-  if (bound.maximumPx != null) {
-    if (bound.minimumPx >= lowerLimit && bound.maximumPx <= upperLimit) {
-      return {
-        kind: 'pass',
-        constraint: constraint.name,
-        target: target.name,
-        minimumPx: bound.minimumPx,
-        maximumPx: bound.maximumPx,
-      }
-    }
-    if (bound.minimumPx === bound.maximumPx || bound.maximumPx < lowerLimit) {
-      return {
-        kind: 'fail',
-        constraint: constraint.name,
-        target: target.name,
-        expectedPixels: constraint.pixels,
-        tolerancePx: constraint.tolerancePx,
-        minimumPx: bound.minimumPx,
-        maximumPx: bound.maximumPx,
-        witnessMinimumPx: bound.witnessMinimumPx,
-        evidence: bound.maximumPx < lowerLimit ? [] : bound.evidence,
-      }
+  const proof = proveLayoutEquality(
+    bound.expression,
+    layoutConstant(constraint.pixels),
+    constraint.tolerancePx,
+  )
+  if (proof.kind === 'violated') {
+    const violation = proof.minimumDelta != null && proof.minimumDelta > constraint.tolerancePx
+      ? {kind: 'atLeast' as const, pixels: constraint.pixels + proof.minimumDelta}
+      : proof.maximumDelta != null && proof.maximumDelta < -constraint.tolerancePx
+        ? {kind: 'atMost' as const, pixels: constraint.pixels + proof.maximumDelta}
+        : null
+    if (violation == null) throw new Error('violated layout equality has no violating bound')
+    return {
+      kind: 'fail',
+      constraint: constraint.name,
+      target: target.name,
+      expectedPixels: constraint.pixels,
+      tolerancePx: constraint.tolerancePx,
+      minimumPx: range.minimumPx,
+      maximumPx: range.maximumPx,
+      witnessMinimumPx: violation.kind === 'atLeast'
+        ? Math.max(bound.witnessMinimumPx, violation.pixels)
+        : bound.witnessMinimumPx,
+      violation,
+      evidence: violation.kind === 'atLeast'
+        ? bound.evidence
+        : [],
     }
   }
-  const spanReason = bound.maximumPx == null
+  if (proof.kind === 'proven' && range.maximumPx != null) {
+    return {
+      kind: 'pass',
+      constraint: constraint.name,
+      target: target.name,
+      minimumPx: range.minimumPx,
+      maximumPx: range.maximumPx,
+    }
+  }
+  const spanReason = range.maximumPx == null
     ? []
-    : [`source alternatives are bounded between ${pixels(bound.minimumPx)} and ${pixels(bound.maximumPx)}, but their conditions are not correlated across siblings`]
+    : [`source alternatives are bounded between ${pixels(range.minimumPx)} and ${pixels(range.maximumPx)}, but their conditions are not correlated across siblings`]
+  const proofReasons = proof.kind === 'unknown' ? proof.reasons : []
   return unknownCheck(
     constraint,
     target,
-    {kind: 'unsupportedSource', reasons: unique([...bound.unknownReasons, ...spanReason])},
-    bound.minimumPx,
-    bound.maximumPx,
+    {kind: 'unsupportedSource', reasons: unique([...bound.unknownReasons, ...proofReasons, ...spanReason])},
+    range.minimumPx,
+    range.maximumPx,
   )
 }
 
@@ -321,8 +351,7 @@ function elementBound(
   const hiddenAdjusted = hidden === 'conditional'
     ? {
         ...merged,
-        minimumPx: 0,
-        maximumPx: null,
+        expression: layoutOpaque({minimum: 0, maximum: null}, 'the hidden attribute is conditional'),
         conditional: true,
       }
     : merged
@@ -333,17 +362,25 @@ function elementBound(
   if (!alternativesNeedCorrelation && !parentAndChildNeedCorrelation && !unprovenElementAlternatives) {
     return hiddenAdjusted
   }
+  const correlationReasons = [
+    ...(alternativesNeedCorrelation ? ['conditional className and style alternatives cannot be correlated'] : []),
+    ...(parentAndChildNeedCorrelation
+      ? ['parent geometry alternatives cannot be correlated with descendant JSX alternatives']
+      : []),
+    ...(unprovenElementAlternatives ? ['conditional className or style alternatives are not proven reachable'] : []),
+  ]
+  const range = sourceRange(hiddenAdjusted.expression)
   return {
     ...hiddenAdjusted,
-    witnessMinimumPx: hiddenAdjusted.minimumPx,
+    expression: layoutOpaque(
+      {minimum: range.minimumPx, maximum: range.maximumPx},
+      correlationReasons as [string, ...string[]],
+    ),
+    witnessMinimumPx: range.minimumPx,
     evidence: [],
     unknownReasons: [
       ...hiddenAdjusted.unknownReasons,
-      ...(alternativesNeedCorrelation ? ['conditional className and style alternatives cannot be correlated'] : []),
-      ...(parentAndChildNeedCorrelation
-        ? ['parent geometry alternatives cannot be correlated with descendant JSX alternatives']
-        : []),
-      ...(unprovenElementAlternatives ? ['conditional className or style alternatives are not proven reachable'] : []),
+      ...correlationReasons,
     ],
   }
 }
@@ -485,8 +522,11 @@ function boundWithFacts(
       ? Math.max(chromePx, clampSpecifiedSize(facts.heightPx, facts))
       : clampSpecifiedSize(facts.heightPx, facts) + chromePx
     return {
-      minimumPx: facts.lowerBoundReliable ? height : 0,
-      maximumPx: facts.unknownReasons.length === 0 ? height : null,
+      expression: facts.lowerBoundReliable
+        ? facts.unknownReasons.length === 0
+          ? layoutConstant(height)
+          : opaqueSourceExpression({minimum: height, maximum: null}, facts.unknownReasons)
+        : opaqueSourceExpression({minimum: 0, maximum: null}, facts.unknownReasons),
       witnessMinimumPx: facts.lowerBoundReliable ? height : 0,
       evidence: facts.lowerBoundReliable
         ? [evidence(element, `explicit block size contributes ${pixels(height)}`, context)]
@@ -505,10 +545,8 @@ function boundWithFacts(
     case 'flex-column': content = stackedSize(childBounds); break
     case 'block': content = blockSize(childBounds); break
   }
-  const minimumPx = facts.lowerBoundReliable ? autoOuterHeight(content.minimumPx, chromePx, facts) : 0
-  const maximumPx = content.maximumPx == null
-    ? null
-    : autoOuterHeight(content.maximumPx, chromePx, facts)
+  const knownExpression = autoOuterExpression(content.expression, chromePx, facts)
+  const knownRange = sourceRange(knownExpression)
   const witnessMinimumPx = facts.lowerBoundReliable
     ? autoOuterHeight(content.witnessMinimumPx, chromePx, facts)
     : 0
@@ -516,8 +554,11 @@ function boundWithFacts(
     ? []
     : [evidence(element, `block padding and borders contribute ${pixels(chromePx)}`, context)]
   return {
-    minimumPx,
-    maximumPx: facts.unknownReasons.length === 0 ? maximumPx : null,
+    expression: facts.lowerBoundReliable
+      ? facts.unknownReasons.length === 0
+        ? knownExpression
+        : opaqueSourceExpression({minimum: knownRange.minimumPx, maximum: null}, facts.unknownReasons)
+      : opaqueSourceExpression({minimum: 0, maximum: null}, facts.unknownReasons),
     witnessMinimumPx,
     evidence: [...content.evidence, ...chromeEvidence],
     unknownReasons: [...content.unknownReasons, ...facts.unknownReasons],
@@ -636,23 +677,35 @@ function mergeConditional(
   trueReachable: boolean,
   falseReachable: boolean,
 ): Bound {
+  const trueRange = sourceRange(whenTrue.expression)
+  const falseRange = sourceRange(whenFalse.expression)
+  const alternatives = layoutChoice(whenTrue.expression, whenFalse.expression)
+  const alternativesRange = sourceRange(alternatives)
+  const reachabilityProven = trueReachable && falseReachable
+  const reachabilityReason = `both outcomes of '${shortText(condition)}' are not proven reachable`
   const trueWins = trueReachable
     && (!falseReachable || whenTrue.witnessMinimumPx >= whenFalse.witnessMinimumPx)
   const witness = trueWins ? whenTrue : whenFalse
   const witnessReachable = trueReachable || falseReachable
   const label = trueWins ? condition : `not (${condition})`
   return {
-    minimumPx: Math.min(whenTrue.minimumPx, whenFalse.minimumPx),
-    maximumPx: whenTrue.maximumPx == null || whenFalse.maximumPx == null
-      ? null
-      : Math.max(whenTrue.maximumPx, whenFalse.maximumPx),
+    expression: reachabilityProven
+      ? alternatives
+      : layoutOpaque(
+          {minimum: alternativesRange.minimumPx, maximum: alternativesRange.maximumPx},
+          reachabilityReason,
+        ),
     witnessMinimumPx: witnessReachable
       ? witness.witnessMinimumPx
-      : Math.min(whenTrue.minimumPx, whenFalse.minimumPx),
+      : Math.min(trueRange.minimumPx, falseRange.minimumPx),
     evidence: witnessReachable
       ? witness.evidence.map(item => ({...item, description: `when ${label}: ${item.description}`}))
       : [],
-    unknownReasons: [...whenTrue.unknownReasons, ...whenFalse.unknownReasons],
+    unknownReasons: [
+      ...whenTrue.unknownReasons,
+      ...whenFalse.unknownReasons,
+      ...(reachabilityProven ? [] : [reachabilityReason]),
+    ],
     marginTopPx: Math.min(whenTrue.marginTopPx, whenFalse.marginTopPx),
     marginBottomPx: Math.min(whenTrue.marginBottomPx, whenFalse.marginBottomPx),
     conditional: true,
@@ -664,14 +717,20 @@ function crossSize(children: Bound[]): Bound {
   const outer = children.map(outerBound)
   const witness = outer.reduce((largest, child) =>
     child.witnessMinimumPx > largest.witnessMinimumPx ? child : largest, outer[0]!)
+  const expression = layoutMaximum(...outer.map(child => child.expression))
+  const correlationRisk = outer.filter(child => child.conditional).length > 1
+  const correlationReason = 'sibling JSX alternatives cannot be correlated across a flex row'
+  const range = sourceRange(expression)
   return {
-    minimumPx: Math.max(...outer.map(child => child.minimumPx)),
-    maximumPx: outer.some(child => child.maximumPx == null)
-      ? null
-      : Math.max(...outer.map(child => child.maximumPx!)),
+    expression: correlationRisk
+      ? layoutOpaque({minimum: range.minimumPx, maximum: range.maximumPx}, correlationReason)
+      : expression,
     witnessMinimumPx: witness.witnessMinimumPx,
     evidence: witness.evidence,
-    unknownReasons: children.flatMap(child => child.unknownReasons),
+    unknownReasons: [
+      ...children.flatMap(child => child.unknownReasons),
+      ...(correlationRisk ? [correlationReason] : []),
+    ],
     marginTopPx: 0,
     marginBottomPx: 0,
     conditional: children.some(child => child.conditional),
@@ -681,25 +740,31 @@ function crossSize(children: Bound[]): Bound {
 function stackedSize(children: Bound[]): Bound {
   if (children.length === 0) return zeroBound()
   const outer = children.map(outerBound)
-  const minimumPx = outer.reduce((sum, child) => sum + child.minimumPx, 0)
-  const maximumPx = outer.some(child => child.maximumPx == null)
-    ? null
-    : outer.reduce((sum, child) => sum + child.maximumPx!, 0)
+  const outerRanges = outer.map(child => sourceRange(child.expression))
+  const minimumPx = outerRanges.reduce((sum, child) => sum + child.minimumPx, 0)
   let witness = outer[0]!
-  let largestExtra = witness.witnessMinimumPx - witness.minimumPx
-  for (const child of outer.slice(1)) {
-    const extra = child.witnessMinimumPx - child.minimumPx
+  let largestExtra = witness.witnessMinimumPx - outerRanges[0]!.minimumPx
+  for (const [index, child] of outer.slice(1).entries()) {
+    const extra = child.witnessMinimumPx - outerRanges[index + 1]!.minimumPx
     if (extra > largestExtra) {
       witness = child
       largestExtra = extra
     }
   }
+  const expression = layoutAdd(...outer.map(child => child.expression))
+  const correlationRisk = outer.filter(child => child.conditional).length > 1
+  const correlationReason = 'sibling JSX alternatives cannot be correlated across a stack'
+  const range = sourceRange(expression)
   return {
-    minimumPx,
-    maximumPx,
+    expression: correlationRisk
+      ? layoutOpaque({minimum: range.minimumPx, maximum: range.maximumPx}, correlationReason)
+      : expression,
     witnessMinimumPx: minimumPx + Math.max(0, largestExtra),
     evidence: witness.evidence,
-    unknownReasons: children.flatMap(child => child.unknownReasons),
+    unknownReasons: [
+      ...children.flatMap(child => child.unknownReasons),
+      ...(correlationRisk ? [correlationReason] : []),
+    ],
     marginTopPx: 0,
     marginBottomPx: 0,
     conditional: children.some(child => child.conditional),
@@ -718,8 +783,7 @@ function outerBound(bound: Bound): Bound {
   const margins = bound.marginTopPx + bound.marginBottomPx
   return {
     ...bound,
-    minimumPx: Math.max(0, bound.minimumPx + margins),
-    maximumPx: bound.maximumPx == null ? null : Math.max(0, bound.maximumPx + margins),
+    expression: layoutMaximum(layoutConstant(0), layoutAdd(bound.expression, layoutConstant(margins))),
     witnessMinimumPx: Math.max(0, bound.witnessMinimumPx + margins),
     marginTopPx: 0,
     marginBottomPx: 0,
@@ -731,10 +795,7 @@ function mergeAlternatives(alternatives: Bound[]): Bound {
   const witness = alternatives.reduce((largest, alternative) =>
     alternative.witnessMinimumPx > largest.witnessMinimumPx ? alternative : largest, alternatives[0]!)
   return {
-    minimumPx: Math.min(...alternatives.map(alternative => alternative.minimumPx)),
-    maximumPx: alternatives.some(alternative => alternative.maximumPx == null)
-      ? null
-      : Math.max(...alternatives.map(alternative => alternative.maximumPx!)),
+    expression: layoutChoice(...alternatives.map(alternative => alternative.expression)),
     witnessMinimumPx: witness.witnessMinimumPx,
     evidence: witness.evidence,
     unknownReasons: alternatives.flatMap(alternative => alternative.unknownReasons),
@@ -1912,6 +1973,24 @@ function autoOuterHeight(contentPx: number, chromePx: number, facts: BlockFacts)
     : clampSpecifiedSize(contentPx, facts) + chromePx
 }
 
+function autoOuterExpression(
+  content: LayoutExpression,
+  chromePx: number,
+  facts: BlockFacts,
+): LayoutExpression {
+  const chrome = layoutConstant(chromePx)
+  return facts.boxSizing === 'border-box'
+    ? layoutMaximum(chrome, clampSpecifiedExpression(layoutAdd(content, chrome), facts))
+    : layoutAdd(clampSpecifiedExpression(content, facts), chrome)
+}
+
+function clampSpecifiedExpression(value: LayoutExpression, facts: BlockFacts): LayoutExpression {
+  const capped = facts.maxHeightPx == null
+    ? value
+    : layoutMinimum(value, layoutConstant(facts.maxHeightPx))
+  return layoutMaximum(capped, layoutConstant(facts.minHeightPx))
+}
+
 function clampSpecifiedSize(value: number, facts: BlockFacts): number {
   const capped = facts.maxHeightPx == null ? value : Math.min(value, facts.maxHeightPx)
   return Math.max(capped, facts.minHeightPx)
@@ -1930,8 +2009,7 @@ function evidence(element: ts.Node, description: string, context: EvaluationCont
 
 function zeroBound(): Bound {
   return {
-    minimumPx: 0,
-    maximumPx: 0,
+    expression: layoutConstant(0),
     witnessMinimumPx: 0,
     evidence: [],
     unknownReasons: [],
@@ -1942,16 +2020,34 @@ function zeroBound(): Bound {
 }
 
 function unknownBound(reason: string | string[]): Bound {
+  const reasons = typeof reason === 'string' ? [reason] : reason
   return {
-    minimumPx: 0,
-    maximumPx: null,
+    expression: opaqueSourceExpression({minimum: 0, maximum: null}, reasons),
     witnessMinimumPx: 0,
     evidence: [],
-    unknownReasons: typeof reason === 'string' ? [reason] : reason,
+    unknownReasons: reasons,
     marginTopPx: 0,
     marginBottomPx: 0,
     conditional: true,
   }
+}
+
+function sourceRange(expression: LayoutExpression): {minimumPx: number; maximumPx: number | null} {
+  const range = layoutExpressionRange(expression)
+  return {minimumPx: range.minimum ?? 0, maximumPx: range.maximum}
+}
+
+function opaqueSourceExpression(
+  range: LayoutExpressionRange,
+  reasons: string[],
+): LayoutExpression {
+  const uniqueReasons = unique(reasons)
+  return layoutOpaque(
+    range,
+    uniqueReasons.length === 0
+      ? 'source block size is outside the supported subset'
+      : uniqueReasons as [string, ...string[]],
+  )
 }
 
 function unknownCheck(

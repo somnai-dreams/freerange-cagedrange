@@ -12,7 +12,12 @@ export type LayoutExpression =
   | {kind: 'minimum'; values: [LayoutExpression, ...LayoutExpression[]]}
   | {kind: 'maximum'; values: [LayoutExpression, ...LayoutExpression[]]}
   | {kind: 'choice'; values: [LayoutExpression, ...LayoutExpression[]]}
-  | {kind: 'unknown'; reasons: [string, ...string[]]}
+  | {
+      kind: 'opaque'
+      minimum: number | null
+      maximum: number | null
+      reasons: [string, ...string[]]
+    }
 
 export type LayoutExpressionRange = {
   minimum: number | null
@@ -78,11 +83,24 @@ export function layoutSymbol(
 }
 
 export function layoutUnknown(reason: string | [string, ...string[]]): LayoutExpression {
+  return layoutOpaque({minimum: null, maximum: null}, reason)
+}
+
+export function layoutOpaque(
+  range: LayoutExpressionRange,
+  reason: string | [string, ...string[]],
+): LayoutExpression {
+  validRange(range, 'opaque layout expression')
   const reasons = uniqueStrings(typeof reason === 'string' ? [reason] : reason)
   if (reasons.length === 0 || reasons.some(item => item.trim() === '')) {
-    throw new Error('layout unknown reasons must be non-empty strings')
+    throw new Error('opaque layout expression reasons must be non-empty strings')
   }
-  return {kind: 'unknown', reasons: reasons as [string, ...string[]]}
+  return {
+    kind: 'opaque',
+    minimum: range.minimum,
+    maximum: range.maximum,
+    reasons: reasons as [string, ...string[]],
+  }
 }
 
 export function layoutAdd(...expressions: LayoutExpression[]): LayoutExpression {
@@ -167,7 +185,7 @@ export function layoutExpressionRange(expression: LayoutExpression): LayoutExpre
   switch (expression.kind) {
     case 'constant': return {minimum: expression.value, maximum: expression.value}
     case 'symbol': return {minimum: expression.minimum, maximum: expression.maximum}
-    case 'unknown': return {minimum: null, maximum: null}
+    case 'opaque': return {minimum: expression.minimum, maximum: expression.maximum}
     case 'sum': return expression.values.reduce<LayoutExpressionRange>((range, value) =>
       addRanges(range, layoutExpressionRange(value)), {minimum: 0, maximum: 0})
     case 'scale': return scaleRange(expression.factor, layoutExpressionRange(expression.value))
@@ -294,7 +312,7 @@ function affineExpression(expression: LayoutExpression): AffineExpression {
     case 'sum': return expression.values.reduce<AffineExpression>((affine, value) =>
       addAffine(affine, affineExpression(value)), {constant: 0, atoms: [], reasons: []})
     case 'scale': return scaleAffine(expression.factor, affineExpression(expression.value))
-    case 'unknown': return {constant: 0, atoms: [], reasons: expression.reasons}
+    case 'opaque': return {constant: 0, atoms: [], reasons: expression.reasons}
     case 'choice': return {constant: 0, atoms: [], reasons: ['layout alternatives require correlation']}
     default: {
       const reasons = collectUnknownReasons(expression)
@@ -332,6 +350,10 @@ function scaleAffine(factor: number, affine: AffineExpression): AffineExpression
 }
 
 function affineRange(affine: AffineExpression): LayoutExpressionRange {
+  if (!Number.isFinite(affine.constant)
+    || affine.atoms.some(atom => !Number.isFinite(atom.coefficient))) {
+    return {minimum: null, maximum: null}
+  }
   let range: LayoutExpressionRange = {minimum: affine.constant, maximum: affine.constant}
   for (const atom of affine.atoms) {
     range = addRanges(range, scaleRange(atom.coefficient, layoutExpressionRange(atom.expression)))
@@ -393,7 +415,7 @@ function containsChoice(expression: LayoutExpression): boolean {
 
 function collectUnknownReasons(expression: LayoutExpression): string[] {
   switch (expression.kind) {
-    case 'unknown': return expression.reasons
+    case 'opaque': return expression.reasons
     case 'sum':
     case 'minimum':
     case 'maximum':
@@ -406,8 +428,8 @@ function collectUnknownReasons(expression: LayoutExpression): string[] {
 function expressionKey(expression: LayoutExpression): string {
   switch (expression.kind) {
     case 'constant': return `constant:${expression.value}`
-    case 'symbol': return `symbol:${expression.name}`
-    case 'unknown': return `unknown:${expression.reasons.join('|')}`
+    case 'symbol': return `symbol:${expression.name}:${expression.minimum}:${expression.maximum}`
+    case 'opaque': return `opaque:${expression.minimum}:${expression.maximum}:${expression.reasons.join('|')}`
     case 'scale': return `scale:${expression.factor}:${expressionKey(expression.value)}`
     case 'sum':
     case 'minimum':
@@ -428,8 +450,12 @@ function uniqueExpressions(expressions: LayoutExpression[]): LayoutExpression[] 
 
 function addRanges(left: LayoutExpressionRange, right: LayoutExpressionRange): LayoutExpressionRange {
   return {
-    minimum: left.minimum == null || right.minimum == null ? null : left.minimum + right.minimum,
-    maximum: left.maximum == null || right.maximum == null ? null : left.maximum + right.maximum,
+    minimum: left.minimum == null || right.minimum == null
+      ? null
+      : finiteResult(left.minimum + right.minimum),
+    maximum: left.maximum == null || right.maximum == null
+      ? null
+      : finiteResult(left.maximum + right.maximum),
   }
 }
 
@@ -447,14 +473,18 @@ function intersectRanges(left: LayoutExpressionRange, right: LayoutExpressionRan
 function scaleRange(factor: number, range: LayoutExpressionRange): LayoutExpressionRange {
   if (factor >= 0) {
     return {
-      minimum: range.minimum == null ? null : range.minimum * factor,
-      maximum: range.maximum == null ? null : range.maximum * factor,
+      minimum: range.minimum == null ? null : finiteResult(range.minimum * factor),
+      maximum: range.maximum == null ? null : finiteResult(range.maximum * factor),
     }
   }
   return {
-    minimum: range.maximum == null ? null : range.maximum * factor,
-    maximum: range.minimum == null ? null : range.minimum * factor,
+    minimum: range.maximum == null ? null : finiteResult(range.maximum * factor),
+    maximum: range.minimum == null ? null : finiteResult(range.minimum * factor),
   }
+}
+
+function finiteResult(value: number): number | null {
+  return Number.isFinite(value) ? value : null
 }
 
 function unionRanges(ranges: LayoutExpressionRange[]): LayoutExpressionRange {

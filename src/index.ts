@@ -31,6 +31,7 @@ export {
   layoutExpressionRange,
   layoutMaximum,
   layoutMinimum,
+  layoutOpaque,
   layoutRowBlockSize,
   layoutScale,
   layoutSymbol,
