@@ -1,31 +1,20 @@
 import {existsSync, readFileSync, statSync} from 'node:fs'
 import {dirname, join, resolve} from 'node:path'
-import {runLayoutSuite} from './chrome.ts'
-import {parseLayoutSuite} from './config.ts'
-import type {LayoutSuite, StaticLayoutAudit} from './model.ts'
-import {formatLayoutReport, formatStaticLayoutReport} from './report.ts'
+import {parseStaticLayoutSuite} from './config.ts'
+import type {StaticLayoutAudit, StaticLayoutSuite} from './model.ts'
+import {formatStaticLayoutReport} from './report.ts'
 import {runStaticLayoutSuite} from './static.ts'
 
 const layoutConfigName = 'freerange.layout.json'
 
-export async function runProjectLayout(searchFrom: string, configuredFile?: string): Promise<boolean> {
-  const project = loadLayoutProject(searchFrom, configuredFile)
-  const staticAudit = runStaticLayoutSuite(project.suite, dirname(project.configFile))
-  if (staticAudit.checks.length > 0) console.log(formatStaticLayoutReport(staticAudit))
-  const audit = await runLayoutSuite(project.suite)
-  console.log(`${staticAudit.checks.length > 0 ? '\n' : ''}${formatLayoutReport(audit)}`)
-  return staticLayoutFailed(staticAudit)
-    || audit.scenarios.some(scenario => scenario.checks.some(check => check.kind !== 'pass'))
-}
-
-export function runProjectStaticLayout(searchFrom: string, configuredFile?: string): boolean {
+export function runProjectLayout(searchFrom: string, configuredFile?: string): boolean {
   const project = loadLayoutProject(searchFrom, configuredFile)
   const audit = runStaticLayoutSuite(project.suite, dirname(project.configFile))
   console.log(formatStaticLayoutReport(audit))
   return staticLayoutFailed(audit)
 }
 
-function loadLayoutProject(searchFrom: string, configuredFile?: string): {configFile: string; suite: LayoutSuite} {
+function loadLayoutProject(searchFrom: string, configuredFile?: string): {configFile: string; suite: StaticLayoutSuite} {
   const configFile = configuredFile == null
     ? findLayoutConfig(searchFrom)
     : resolve(searchFrom, configuredFile)
@@ -41,8 +30,7 @@ function loadLayoutProject(searchFrom: string, configuredFile?: string): {config
   } catch (error) {
     throw new Error(`Could not parse ${configFile}: ${error instanceof Error ? error.message : String(error)}`)
   }
-  const suite = parseLayoutSuite(parsed)
-  return {configFile, suite}
+  return {configFile, suite: parseStaticLayoutSuite(parsed)}
 }
 
 function staticLayoutFailed(audit: StaticLayoutAudit): boolean {

@@ -24,10 +24,9 @@ There's no API =). Your TypeScript code provides enough information for Freerang
 - `fr`: print project errors and warnings
 - `fr --audit`: print every function's contracts, plus refactor suggestions to help Freerange analyze better. Great for agents
 - `fr --spacing`: scan JSX for spacing-ownership findings — elements that mix inline-style positioning with class-based spacing
-- `fr --layout-static`: check source-linked block-size contracts from `freerange.layout.json` without starting the application or Chrome
-- `fr --layout`: run the static preflight, then render named routes in headless Chrome and enforce exact-size and edge-alignment contracts
+- `fr --layout`: check source-linked intrinsic block-size contracts from `freerange.layout.json`
 
-Pass a file path to `fr`, `fr --audit`, or `fr --spacing` to filter down to that file's report. The layout commands instead accept an optional layout-config path and otherwise search upward for `freerange.layout.json`.
+Pass a file path to `fr`, `fr --audit`, or `fr --spacing` to filter down to that file's report. `fr --layout` instead accepts an optional layout-config path and otherwise searches upward for `freerange.layout.json`.
 
 `fr` directly uses TypeScript under the hood, so it naturally respects your `tsconfig`. We output TS errors before our analysis, so technically, you can swap out your explicit `tsc --noEmit` command for `fr` and nothing changes!
 
@@ -178,72 +177,34 @@ The no-position check also keeps the conditions under which an inline offset has
 
 Every intrinsic element contributes a coverage result: complete, partial with every known limitation, or unsupported with the first blocker. A props spread, computed class, opaque style member, computed offset presence, or uncorrelated position and offset condition therefore appears under `coverage limits`, not as a finding. Visible conflicts still report on a partially covered element, while an absence-based finding such as an offset with no position stands down unless the visible syntax proves the absence. The finding count contains only ownership problems. Library users can call `auditSpacingSource(file, source)` to receive the element audits and can pass those audits to `formatSpacingReport`. The public result keeps findings, coverage, and spacing values as separate fields.
 
-After the findings, the report prints the project's spacing vocabulary: every margin, padding, and gap amount from class utilities and literal inline styles, grouped by axis and kind, most common first. Values used once or twice print on a separate `rare:` line with their locations — a value like `13px` in a 4px-grid codebase, or one `mb-2.5` among `mb-2`s, is where an inconsistency hides. The structured audit retains whether an amount came from Tailwind's numeric scale, px, or rem. The CLI normalizes the distribution with an explicit Tailwind step of `0.25rem` and root font size of `16px`, and prints only the assumptions the values actually use. A report containing only px values prints no assumption; rem prints the root font size; Tailwind numeric utilities print both. An inline style value that is a name appears under that name, e.g. `clusterPaddingY ×2`, so TypeScript-computed spacing is visible in the same distribution even though its value is not statically knowable. The distribution reports declared spacing, not final geometry. Use a source-linked size contract when the box calculation is statically visible, and keep the rendered check for stylesheet, font, and application-state behavior.
+After the findings, the report prints the project's spacing vocabulary: every margin, padding, and gap amount from class utilities and literal inline styles, grouped by axis and kind, most common first. Values used once or twice print on a separate `rare:` line with their locations — a value like `13px` in a 4px-grid codebase, or one `mb-2.5` among `mb-2`s, is where an inconsistency hides. The structured audit retains whether an amount came from Tailwind's numeric scale, px, or rem. The CLI normalizes the distribution with an explicit Tailwind step of `0.25rem` and root font size of `16px`, and prints only the assumptions the values actually use. A report containing only px values prints no assumption; rem prints the root font size; Tailwind numeric utilities print both. An inline style value that is a name appears under that name, e.g. `clusterPaddingY ×2`, so TypeScript-computed spacing is visible in the same distribution even though its value is not statically knowable. The distribution reports declared spacing, not final geometry. Use an intrinsic block-size contract when the box calculation is statically visible.
 
-## Layout contracts
+## Intrinsic block-size contracts
 
-One `freerange.layout.json` suite can drive a static source preflight and rendered checks. A target with a `source` entry links an intrinsic JSX element to the same literal `data-fr-layout` marker used by its browser selector. `bun fr.ts --layout-static` checks supported block-axis `equalsPixels` constraints directly from the TypeScript project. `bun fr.ts --layout` runs that preflight and then checks final browser geometry for every configured scenario.
+`bun fr.ts --layout` checks a deliberately bounded source model. A target links one intrinsic JSX element through a literal `data-fr-layout` marker, and each `intrinsicBlockSize` constraint states the expected block size plus the viewport widths whose responsive utilities must be considered.
 
-For example, this suite checks that a resting input row remains 52px when a route adds another button, and that the feed and sidebar content begin on the same horizontal line:
+For example, this suite checks that an input row's source structure remains intrinsically 52px tall when a conditional control is present:
 
 ```json
 {
-  "baseUrl": "http://127.0.0.1:3000",
   "targets": [
     {
       "name": "composer",
-      "selector": "[data-fr-layout=\"composer\"]",
       "source": {
         "kind": "jsx",
         "file": "src/components/Composer.tsx",
         "marker": "composer"
       }
-    },
-    {"name": "feed-content", "selector": "[data-fr-layout=\"feed-content\"]"},
-    {"name": "sidebar-content", "selector": "[data-fr-layout=\"sidebar-content\"]"},
-    {"name": "feed-track", "selector": "[data-fr-layout=\"feed-track\"]"},
-    {"name": "sidebar-track", "selector": "[data-fr-layout=\"sidebar-track\"]"}
-  ],
-  "scenarios": [
-    {
-      "name": "create",
-      "url": "/create",
-      "viewport": {"width": 1440, "height": 900},
-      "readySelector": "[data-fr-layout-ready=\"create\"]"
-    },
-    {
-      "name": "create-with-search",
-      "url": "/create?search=1",
-      "viewport": {"width": 1440, "height": 900},
-      "readySelector": "[data-fr-layout-ready=\"create-with-search\"]"
     }
   ],
   "constraints": [
     {
-      "kind": "equalsPixels",
-      "name": "resting composer height",
+      "kind": "intrinsicBlockSize",
+      "name": "composer intrinsic block size",
       "target": "composer",
-      "metric": {"kind": "size", "axis": "block"},
       "pixels": 52,
       "tolerancePx": 0.25,
-      "scenarios": ["create", "create-with-search"]
-    },
-    {
-      "kind": "align",
-      "name": "feed and styles content start together",
-      "targets": ["feed-content", "sidebar-content"],
-      "metric": {"kind": "edge", "axis": "block", "edge": "start"},
-      "tolerancePx": 0.5,
-      "scenarios": ["create"]
-    }
-  ],
-  "inferAlignments": [
-    {
-      "name": "gallery columns",
-      "tracks": ["feed-track", "sidebar-track"],
-      "axis": "block",
-      "tolerancePx": 0.5,
-      "scenarios": ["create"]
+      "viewportWidths": [390, 1440]
     }
   ]
 }
@@ -259,15 +220,9 @@ The source element carries the marker literally:
 </div>
 ```
 
-The static preflight follows immutable numeric and string constants through same-project imports, evaluates finite arithmetic, and combines explicit inline sizes with a bounded Tailwind subset for height, block padding and margin, border width, flex direction, positioning, visibility, and box sizing. Every source report prints its assumptions: Tailwind numeric lengths and breakpoints use their defaults, Tailwind's `border-box` preflight applies, and CSS rules outside the model do not change block geometry. Fixed-height wrappers bound opaque descendants; absolutely positioned or hidden children do not add in-flow pressure. Single default responsive variants are evaluated against the configured viewport widths. Conditional class, style, and JSX alternatives are checked separately, but a branch contributes a definite failure witness only when its reachability can be proven. For example, a reachable 32px control inside a row with 20px of padding and a 2px outer border reports a definite 54px requirement against a 52px contract, with the condition and contributing source lines.
+The analyzer follows immutable numeric and string constants through same-project imports, evaluates finite arithmetic, and combines explicit inline sizes with a bounded Tailwind subset for height, block padding and margin, border width, flex direction, positioning, visibility, and box sizing. Every report prints its assumptions: Tailwind numeric lengths and breakpoints use their defaults, Tailwind's `border-box` preflight applies, and CSS rules outside the model do not change block geometry. Fixed-height wrappers bound opaque descendants; absolutely positioned or hidden children do not add in-flow pressure. Default responsive variants are evaluated against every configured viewport width. Conditional class, style, and JSX alternatives are checked separately, but a branch contributes a definite failure witness only when its reachability can be proven. For example, a reachable 32px control inside a row with 20px of padding and a 2px outer border reports a definite 54px requirement against a 52px contract, with the condition and contributing source lines.
 
-This is deliberately not a general CSS layout engine. Component internals, text wrapping, runtime CSS variants, responsive geometry that differs across the configured viewports, percentage sizes, negative block margins, multi-line flex layout, stored runtime boolean aliases, and expressions outside the supported subset make the result `unknown` unless an explicit boundary already proves the relevant size. Non-replaced inline elements need an explicit block-capable display before their height can be checked. A hidden ancestor, a size-constrained flex-column parent, or a flex-row parent stretching an auto-height target also makes the marked target unknown because the local box arithmetic cannot prove that the target has, or keeps, its own principal box. External stylesheets are not read, which is why their absence from the box calculation is stated as an assumption rather than silently presented as proof. A definite lower-bound violation still reports as an error even when unrelated content is opaque; Freerange does not hide known bad arithmetic behind incomplete coverage. Static alignment inference is not attempted because sibling alignment generally depends on composed structure and application state.
-
-Each constraint states exactly which scenarios it covers. Passing `create` does not claim that an unrendered React branch, route, viewport, scroll position, or application state is safe. Each scenario's `readySelector` must match exactly one element once that named state has finished rendering; using `body` is appropriate only for a static page. A missing selector, multiple matches, an element without a principal box, unsupported writing mode, unsuccessful page response, invalid readiness selector, or geometry that does not settle is `unknown` coverage rather than a pass.
-
-The runner requires a successful main-document response, waits for the readiness selector and `document.fonts.ready`, then requires 15 consecutive stable animation frames. Exact-size failures report the measured size and every largest in-flow direct child margin box along the constrained axis when the target grew. That evidence often includes the control that expanded a flex row without claiming that any listed child necessarily caused the final size. The target itself should be the state whose size is invariant: a composer that legitimately grows for multiline input can constrain its resting row or list only resting scenarios instead of asserting that the entire composer is always 52px.
-
-Alignment inference is deliberately narrower than explicit contracts. An `inferAlignments` entry names two or more rendered track targets and an axis. Freerange compares their visible direct children in order and prints a candidate when corresponding starts differ beyond the tolerance. Matching non-empty `data-fr-layout-band` values, e.g. `content` on both columns' content wrappers, make the suggestion strong. Unmarked pairs and different direct-child counts print as ambiguous, not as proof of a bug. Inference never scans the whole page and never fails CI: promote a useful candidate by adding stable targets and an explicit `align` constraint.
+This is deliberately not a general CSS layout engine. Component internals, text wrapping, runtime CSS variants, responsive geometry that differs across the configured viewports, percentage sizes, negative block margins, multi-line flex layout, stored runtime boolean aliases, and expressions outside the supported subset make the result `unknown` unless an explicit boundary already proves the relevant size. Non-replaced inline elements need an explicit block-capable display before their height can be checked. A hidden ancestor, a size-constrained flex-column parent, or a flex-row parent stretching an auto-height target also makes the marked target unknown because the local box arithmetic cannot prove that the target has, or keeps, its own principal box. External stylesheets are not read, which is why their absence from the box calculation is stated as an assumption rather than silently presented as proof. A definite lower-bound violation still reports as an error even when unrelated content is opaque; Freerange does not hide known bad arithmetic behind incomplete coverage. Final browser geometry and cross-component alignment belong to a separate concrete layout system.
 
 ## Recommended TypeScript Config
 

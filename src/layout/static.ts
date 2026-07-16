@@ -8,12 +8,12 @@ import {
   type ProjectSource,
 } from '../typescript/project.ts'
 import type {
-  LayoutConstraint,
-  LayoutSuite,
-  LayoutTarget,
   StaticLayoutAudit,
   StaticLayoutCheck,
+  StaticLayoutConstraint,
   StaticLayoutEvidence,
+  StaticLayoutSuite,
+  StaticLayoutTarget,
   StaticLayoutUnknownReason,
 } from './model.ts'
 
@@ -51,20 +51,20 @@ type BlockFacts = {
 
 type StyleAlternative = Map<string, ts.Expression>
 
-export function runStaticLayoutSuite(suite: LayoutSuite, configDirectory: string): StaticLayoutAudit {
-  const requested = sourceChecks(suite)
-  if (requested.length === 0) return {checks: []}
+export function runStaticLayoutSuite(suite: StaticLayoutSuite, configDirectory: string): StaticLayoutAudit {
+  if (suite.constraints.length === 0) return {checks: []}
   const configPath = findTypeScriptConfig(configDirectory)
   if (configPath == null) {
-    return {checks: requested.map(({constraint, target}) => unknownCheck(
+    return {checks: suite.constraints.map(constraint => unknownCheck(
       constraint,
-      target,
+      targetForConstraint(suite, constraint),
       {kind: 'typescriptProjectMissing'},
     ))}
   }
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   return {
-    checks: requested.map(({constraint, target, viewportWidths}) => {
+    checks: suite.constraints.map(constraint => {
+      const target = targetForConstraint(suite, constraint)
       const sourceFile = resolve(configDirectory, target.source.file)
       if (!existsSync(sourceFile)) {
         return unknownCheck(constraint, target, {kind: 'sourceFileMissing', file: target.source.file})
@@ -73,41 +73,20 @@ export function runStaticLayoutSuite(suite: LayoutSuite, configDirectory: string
       if (projectSource == null) {
         return unknownCheck(constraint, target, {kind: 'sourceFileOutsideProject', file: target.source.file})
       }
-      return auditSourceConstraint(projectSource, constraint, target, configDirectory, viewportWidths)
+      return auditSourceConstraint(projectSource, constraint, target, configDirectory)
     }),
   }
 }
 
-function sourceChecks(suite: LayoutSuite): Array<{
-  constraint: Extract<LayoutConstraint, {kind: 'equalsPixels'}>
-  target: LayoutTarget & {source: NonNullable<LayoutTarget['source']>}
-  viewportWidths: number[]
-}> {
-  const targets = new Map(suite.targets.map(target => [target.name, target]))
-  const scenarios = new Map(suite.scenarios.map(scenario => [scenario.name, scenario]))
-  const checks: Array<{
-    constraint: Extract<LayoutConstraint, {kind: 'equalsPixels'}>
-    target: LayoutTarget & {source: NonNullable<LayoutTarget['source']>}
-    viewportWidths: number[]
-  }> = []
-  for (const constraint of suite.constraints) {
-    if (constraint.kind !== 'equalsPixels' || constraint.metric.axis !== 'block') continue
-    const target = targets.get(constraint.target)
-    if (target?.source != null) checks.push({
-      constraint,
-      target: {...target, source: target.source},
-      viewportWidths: constraint.scenarios.map(name => scenarios.get(name)!.viewport.width),
-    })
-  }
-  return checks
+function targetForConstraint(suite: StaticLayoutSuite, constraint: StaticLayoutConstraint): StaticLayoutTarget {
+  return suite.targets.find(target => target.name === constraint.target)!
 }
 
 function auditSourceConstraint(
   projectSource: ProjectSource,
-  constraint: Extract<LayoutConstraint, {kind: 'equalsPixels'}>,
-  target: LayoutTarget & {source: NonNullable<LayoutTarget['source']>},
+  constraint: StaticLayoutConstraint,
+  target: StaticLayoutTarget,
   configDirectory: string,
-  viewportWidths: number[],
 ): StaticLayoutCheck {
   const matches = findMarkedElements(projectSource.sourceFile, target.source.marker)
   if (matches.length === 0) {
@@ -124,7 +103,7 @@ function auditSourceConstraint(
     checker: projectSource.project.program.getTypeChecker(),
     configDirectory,
     constantStack: new Set(),
-    viewportWidths,
+    viewportWidths: constraint.viewportWidths,
   }
   const markedElement = matches[0]!
   const reachability = markedElementReachability(markedElement, context)
@@ -635,7 +614,7 @@ function expressionChildBound(expression: ts.Expression, context: EvaluationCont
     case ts.SyntaxKind.FalseKeyword:
     case ts.SyntaxKind.TrueKeyword:
       return zeroBound()
-    default: return unknownBound(`expression '${shortText(expression.getText())}' has unknown rendered size`)
+    default: return unknownBound(`expression '${shortText(expression.getText())}' has unknown intrinsic block size`)
   }
 }
 
@@ -1959,8 +1938,8 @@ function unknownBound(reason: string | string[]): Bound {
 }
 
 function unknownCheck(
-  constraint: Extract<LayoutConstraint, {kind: 'equalsPixels'}>,
-  target: LayoutTarget,
+  constraint: StaticLayoutConstraint,
+  target: StaticLayoutTarget,
   reason: StaticLayoutUnknownReason,
   minimumPx: number | null = null,
   maximumPx: number | null = null,

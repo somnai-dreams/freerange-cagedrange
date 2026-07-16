@@ -8,6 +8,7 @@
     "url": "git+https://github.com/chenglou/freerange.git"
   },
   "type": "module",
+  "exports": "./src/index.ts",
   "bin": {
     "fr": "dist/fr.js"
   },

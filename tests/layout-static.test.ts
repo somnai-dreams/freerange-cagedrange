@@ -3,7 +3,7 @@ import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {parseLayoutSuite} from '../src/layout/config.ts'
+import {parseStaticLayoutSuite} from '../src/layout/config.ts'
 import {formatStaticLayoutReport} from '../src/layout/report.ts'
 import {runStaticLayoutSuite} from '../src/layout/static.ts'
 
@@ -18,27 +18,18 @@ function writeFiles(directory: string, files: Record<string, string>): void {
 }
 
 function suite(file = 'Composer.tsx', pixels = 52) {
-  return parseLayoutSuite({
-    baseUrl: 'http://127.0.0.1:3000',
+  return parseStaticLayoutSuite({
     targets: [{
       name: 'composer',
-      selector: '[data-fr-layout="composer"]',
       source: {kind: 'jsx', file, marker: 'composer'},
     }],
-    scenarios: [{
-      name: 'resting',
-      url: '/',
-      viewport: {width: 1440, height: 900},
-      readySelector: 'body',
-    }],
     constraints: [{
-      kind: 'equalsPixels',
-      name: 'resting composer height',
+      kind: 'intrinsicBlockSize',
+      name: 'composer intrinsic block size',
       target: 'composer',
-      metric: {kind: 'size', axis: 'block'},
       pixels,
       tolerancePx: 0.25,
-      scenarios: ['resting'],
+      viewportWidths: [1440],
     }],
   })
 }
@@ -80,7 +71,7 @@ test('static block pressure proves an exact supported composer size', () => {
   try {
     expect(audit.checks).toEqual([{
       kind: 'pass',
-      constraint: 'resting composer height',
+      constraint: 'composer intrinsic block size',
       target: 'composer',
       minimumPx: 52,
       maximumPx: 52,
@@ -256,7 +247,7 @@ export function Composer({showFirst}: {showFirst: boolean}) {
       maximumPx: 20,
       reason: {kind: 'unsupportedSource'},
     })
-    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(directory, {recursive: true, force: true})
   }
@@ -275,7 +266,7 @@ export function Composer({flag}: {flag: boolean}) {
 `, '', 80)
   try {
     expect(audit.checks[0]).toMatchObject({kind: 'unknown'})
-    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(directory, {recursive: true, force: true})
   }
@@ -294,7 +285,7 @@ export function Composer({flag}: {flag: boolean}) {
 `, '', 40)
   try {
     expect(audit.checks[0]).toMatchObject({kind: 'unknown'})
-    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(directory, {recursive: true, force: true})
   }
@@ -313,7 +304,7 @@ export function Composer({flag}: {flag: boolean}) {
 `, '', 80)
   try {
     expect(nested.audit.checks[0]).toMatchObject({kind: 'unknown'})
-    expect(formatStaticLayoutReport(nested.audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(nested.audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(nested.directory, {recursive: true, force: true})
   }
@@ -329,7 +320,7 @@ export function Composer({flag}: {flag: boolean}) {
 `, '', 40)
   try {
     expect(direct.audit.checks[0]).toMatchObject({kind: 'unknown'})
-    expect(formatStaticLayoutReport(direct.audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(direct.audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(direct.directory, {recursive: true, force: true})
   }
@@ -369,7 +360,7 @@ export const composer = false && <div data-fr-layout="composer" style={{height: 
       kind: 'unknown',
       reason: {kind: 'unsupportedSource'},
     })
-    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(directory, {recursive: true, force: true})
   }
@@ -416,7 +407,7 @@ export const composer = <div
 `, '', 40)
   try {
     expect(hiddenTarget.audit.checks[0]).toMatchObject({kind: 'unknown'})
-    expect(formatStaticLayoutReport(hiddenTarget.audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(hiddenTarget.audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(hiddenTarget.directory, {recursive: true, force: true})
   }
@@ -474,7 +465,7 @@ export const composer = <div data-fr-layout="composer" className="flex">
 `, '', 40)
   try {
     expect(mutatedCondition.audit.checks[0]).toMatchObject({kind: 'unknown'})
-    expect(formatStaticLayoutReport(mutatedCondition.audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(mutatedCondition.audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(mutatedCondition.directory, {recursive: true, force: true})
   }
@@ -574,7 +565,7 @@ export const composer = <div style={{display: 'flex', flexDirection: 'column', h
 `, '', 40)
   try {
     expect(audit.checks[0]).toMatchObject({kind: 'unknown'})
-    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(directory, {recursive: true, force: true})
   }
@@ -723,7 +714,7 @@ export const composer = <div
 `, '', 40)
   try {
     expect(fullyOverriddenBase.audit.checks[0]).toMatchObject({kind: 'unknown', minimumPx: 0})
-    expect(formatStaticLayoutReport(fullyOverriddenBase.audit)).not.toContain('error [layout-source-size]')
+    expect(formatStaticLayoutReport(fullyOverriddenBase.audit)).not.toContain('error [layout-intrinsic-block-size]')
   } finally {
     rmSync(fullyOverriddenBase.directory, {recursive: true, force: true})
   }
@@ -765,33 +756,24 @@ export const composer = <div data-fr-layout="composer" hidden style={{height: 40
   }
 })
 
-test('fr --layout-static finds the project config and gates source failures without Chrome', async () => {
+test('fr --layout finds the project config and gates intrinsic block-size failures without Chrome', async () => {
   const {directory} = project(passingComposer)
   try {
     writeFileSync(join(directory, 'freerange.layout.json'), JSON.stringify({
-      baseUrl: 'http://127.0.0.1:3000',
       targets: [{
         name: 'composer',
-        selector: '[data-fr-layout="composer"]',
         source: {kind: 'jsx', file: 'Composer.tsx', marker: 'composer'},
       }],
-      scenarios: [{
-        name: 'resting',
-        url: '/',
-        viewport: {width: 1440, height: 900},
-        readySelector: 'body',
-      }],
       constraints: [{
-        kind: 'equalsPixels',
-        name: 'resting composer height',
+        kind: 'intrinsicBlockSize',
+        name: 'composer intrinsic block size',
         target: 'composer',
-        metric: {kind: 'size', axis: 'block'},
         pixels: 51,
         tolerancePx: 0.25,
-        scenarios: ['resting'],
+        viewportWidths: [1440],
       }],
     }))
-    const subprocess = Bun.spawn([process.execPath, freerangeCli, '--layout-static'], {
+    const subprocess = Bun.spawn([process.execPath, freerangeCli, '--layout'], {
       cwd: directory,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -803,55 +785,8 @@ test('fr --layout-static finds the project config and gates source failures with
     ])
     expect(exitCode).toBe(1)
     expect(stderr).toBe('')
-    expect(stdout).toContain('Static layout preflight:')
+    expect(stdout).toContain('Static intrinsic block-size contracts:')
     expect(stdout).toContain('computes to 52px; expected 51px ±0.25px')
-    expect(stdout).not.toContain('Rendered layout contracts:')
-  } finally {
-    rmSync(directory, {recursive: true, force: true})
-  }
-})
-
-test('fr --layout prints a completed static phase before a Chrome startup error', async () => {
-  const {directory} = project(passingComposer)
-  try {
-    writeFileSync(join(directory, 'freerange.layout.json'), JSON.stringify({
-      baseUrl: 'http://127.0.0.1:3000',
-      targets: [{
-        name: 'composer',
-        selector: '[data-fr-layout="composer"]',
-        source: {kind: 'jsx', file: 'Composer.tsx', marker: 'composer'},
-      }],
-      scenarios: [{
-        name: 'resting',
-        url: '/',
-        viewport: {width: 1440, height: 900},
-        readySelector: 'body',
-      }],
-      constraints: [{
-        kind: 'equalsPixels',
-        name: 'resting composer height',
-        target: 'composer',
-        metric: {kind: 'size', axis: 'block'},
-        pixels: 51,
-        tolerancePx: 0.25,
-        scenarios: ['resting'],
-      }],
-    }))
-    const subprocess = Bun.spawn([process.execPath, freerangeCli, '--layout'], {
-      cwd: directory,
-      env: {...process.env, CHROME_PATH: '/definitely/not/chrome'},
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(subprocess.stdout).text(),
-      new Response(subprocess.stderr).text(),
-      subprocess.exited,
-    ])
-    expect(exitCode).toBe(1)
-    expect(stdout).toContain('Static layout preflight:')
-    expect(stdout).toContain('computes to 52px; expected 51px ±0.25px')
-    expect(stderr).toContain('Could not find Chrome or Chromium')
   } finally {
     rmSync(directory, {recursive: true, force: true})
   }

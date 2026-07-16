@@ -21,13 +21,8 @@ export {formatReport} from './report/index.ts'
 export {formatFileAuditUnit, refactorGuide, refactorGuides} from './audit.ts'
 export {auditSpacingSource, formatSpacingReport, spacingPreamble} from './spacing/index.ts'
 export {
-  auditLayoutSnapshot,
-  auditLayoutSnapshots,
-  findChromeExecutable,
-  formatLayoutReport,
   formatStaticLayoutReport,
-  parseLayoutSuite,
-  runLayoutSuite,
+  parseStaticLayoutSuite,
   runStaticLayoutSuite,
 } from './layout/index.ts'
 export type {AuditCoverage, AuditReason, AuditReference, FileAudit, RefactorGuide, RefactorGuideID} from './audit.ts'
@@ -47,29 +42,12 @@ export type {
   SpacingValueKind,
 } from './spacing/index.ts'
 export type {
-  LayoutAxis,
-  LayoutAlignmentInference,
-  LayoutBox,
-  LayoutCheck,
-  LayoutChildBox,
-  LayoutConstraint,
-  LayoutMetric,
-  LayoutInference,
-  LayoutInferenceAmbiguity,
-  LayoutInferenceEvidence,
-  LayoutInferenceUnknownReason,
-  LayoutRect,
-  LayoutScenario,
-  LayoutScenarioAudit,
-  LayoutScenarioSnapshot,
-  LayoutSourceTarget,
-  LayoutSuite,
-  LayoutSuiteAudit,
-  LayoutTarget,
-  LayoutTargetObservation,
-  LayoutUnknownReason,
   StaticLayoutAudit,
   StaticLayoutCheck,
+  StaticLayoutConstraint,
   StaticLayoutEvidence,
+  StaticLayoutSourceTarget,
+  StaticLayoutSuite,
+  StaticLayoutTarget,
   StaticLayoutUnknownReason,
 } from './layout/index.ts'
