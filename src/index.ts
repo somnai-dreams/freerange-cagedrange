@@ -37,6 +37,7 @@ export {
   layoutSymbol,
   layoutUnknown,
   parseStaticLayoutSuite,
+  proveLayoutAlignment,
   proveLayoutEquality,
   runStaticLayoutSuite,
 } from './layout/index.ts'
@@ -58,12 +59,16 @@ export type {
 } from './spacing/index.ts'
 export type {
   LayoutAxis,
+  LayoutAlignmentComparison,
+  LayoutAlignmentProof,
   LayoutBox,
   LayoutBoxAxis,
+  LayoutBoxLayer,
   LayoutEqualityProof,
   LayoutExpression,
   LayoutExpressionRange,
   LayoutMetric,
+  LayoutMeasurementConstraint,
   StaticLayoutAudit,
   StaticLayoutCheck,
   StaticLayoutConstraint,

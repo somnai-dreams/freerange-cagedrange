@@ -16,6 +16,7 @@ export {
   proveLayoutEquality,
 } from './algebra.ts'
 export {parseStaticLayoutSuite} from './config.ts'
+export {proveLayoutAlignment} from './constraint.ts'
 export {formatStaticLayoutReport} from './report.ts'
 export {runStaticLayoutSuite} from './static.ts'
 export type {
@@ -27,6 +28,12 @@ export type {
   LayoutExpressionRange,
   LayoutMetric,
 } from './algebra.ts'
+export type {
+  LayoutAlignmentComparison,
+  LayoutAlignmentProof,
+  LayoutBoxLayer,
+  LayoutMeasurementConstraint,
+} from './constraint.ts'
 export type {
   StaticLayoutAudit,
   StaticLayoutCheck,

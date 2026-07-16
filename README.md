@@ -185,6 +185,8 @@ After the findings, the report prints the project's spacing vocabulary: every ma
 
 The proof calculation is available independently of JSX through Freerange's layout algebra. Constants, named symbolic measurements, bounded opaque values, addition, scaling, `min`, `max`, alternatives, row/column block composition, border-box composition, and logical box metrics produce normalized layout expressions. `proveLayoutEquality(left, right, tolerance)` returns `proven`, `violated`, or `unknown`. Identical symbolic terms cancel, so two starts derived from the same unknown header height can still be proven equal; unrelated unknown heights remain unknown. The JSX/Tailwind analyzer lowers its block-size calculation into these expressions while retaining source-specific reachability evidence and reporting uncertain branch correlation as bounded opacity.
 
+`LayoutMeasurementConstraint<Reference>` shares the source-independent constraint vocabulary with concrete observers without deciding how a reference resolves. It covers exact pixel sizes and alignment, logical metrics, and border, padding, or content box layers. `proveLayoutAlignment(expressions, tolerance)` checks every pair, so three measurements cannot pass merely because each outer measurement is individually close to the first while their full spread exceeds the tolerance.
+
 For example, this suite checks that an input row's source structure remains intrinsically 52px tall when a conditional control is present:
 
 ```json
