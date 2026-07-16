@@ -211,6 +211,90 @@ export const inputPaddingYPills = (inputMinInputHeight - pillsInputLineHeight) /
   }
 })
 
+// Adapted from agent-worktree-manager/src/MenuBar.tsx. This is intentionally a custom-
+// CSS component rather than a Tailwind fixture: the explicit height is the source
+// boundary, and the mapped menu/dropdown structure stays opaque behind it.
+test('a Worktree Manager menubar keeps its explicit production height', () => {
+  const source = `
+type Menu = {label: string; bold: boolean; items: {label: string; separator: boolean}[]}
+export function MenuBar({menus, openMenu}: {menus: Menu[]; openMenu: string | null}) {
+  return <div
+    data-fr-layout="composer"
+    className="mac-menubar"
+    style={{height: '26px', fontSize: '14px'}}
+  >
+    {menus.map(menu => <span
+      key={menu.label}
+      className={\`mac-menubar-item \${openMenu === menu.label ? 'active' : ''}\`}
+      style={{position: 'relative', fontWeight: menu.bold ? 600 : undefined}}
+    >
+      {menu.label}
+      {openMenu === menu.label && <div className="mac-dropdown">
+        {menu.items.map(item => <div key={item.label}>{item.label}</div>)}
+      </div>}
+    </span>)}
+  </div>
+}
+`
+  const production = project(source, '', 26)
+  try {
+    expect(production.audit.checks[0]).toMatchObject({
+      kind: 'pass',
+      minimumPx: 26,
+      maximumPx: 26,
+    })
+  } finally {
+    rmSync(production.directory, {recursive: true, force: true})
+  }
+
+  const regression = project(source.replace("height: '26px'", "height: '28px'"), '', 26)
+  try {
+    expect(regression.audit.checks[0]).toMatchObject({
+      kind: 'fail',
+      witnessMinimumPx: 28,
+    })
+  } finally {
+    rmSync(regression.directory, {recursive: true, force: true})
+  }
+})
+
+// Adapted from Crossword/src/components/constructor/DraftSelector.tsx. The production
+// control renders PencilIcon at 12px inside p-1; the fixture inlines the SVG that the
+// icon component returns so the source boundary remains self-contained.
+test('a Crossword icon control keeps its padding-built height', () => {
+  const source = `
+export function RenameDraft() {
+  return <button
+    data-fr-layout="composer"
+    className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+    title="Rename"
+  >
+    <svg className="block h-3 w-3" />
+  </button>
+}
+`
+  const production = project(source, '', 20)
+  try {
+    expect(production.audit.checks[0]).toMatchObject({
+      kind: 'pass',
+      minimumPx: 20,
+      maximumPx: 20,
+    })
+  } finally {
+    rmSync(production.directory, {recursive: true, force: true})
+  }
+
+  const regression = project(source.replace('p-1 ', 'p-1.5 '), '', 20)
+  try {
+    expect(regression.audit.checks[0]).toMatchObject({
+      kind: 'fail',
+      witnessMinimumPx: 24,
+    })
+  } finally {
+    rmSync(regression.directory, {recursive: true, force: true})
+  }
+})
+
 test('missing source files and duplicate markers are unknown coverage', () => {
   const directory = mkdtempSync(join(tmpdir(), 'freerange-static-layout-coverage-'))
   try {
