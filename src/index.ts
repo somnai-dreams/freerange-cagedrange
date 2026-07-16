@@ -22,7 +22,21 @@ export {formatFileAuditUnit, refactorGuide, refactorGuides} from './audit.ts'
 export {auditSpacingSource, formatSpacingReport, spacingPreamble} from './spacing/index.ts'
 export {
   formatStaticLayoutReport,
+  layoutAdd,
+  layoutBorderBlockSize,
+  layoutBoxMetric,
+  layoutChoice,
+  layoutColumnBlockSize,
+  layoutConstant,
+  layoutExpressionRange,
+  layoutMaximum,
+  layoutMinimum,
+  layoutRowBlockSize,
+  layoutScale,
+  layoutSymbol,
+  layoutUnknown,
   parseStaticLayoutSuite,
+  proveLayoutEquality,
   runStaticLayoutSuite,
 } from './layout/index.ts'
 export type {AuditCoverage, AuditReason, AuditReference, FileAudit, RefactorGuide, RefactorGuideID} from './audit.ts'
@@ -42,6 +56,13 @@ export type {
   SpacingValueKind,
 } from './spacing/index.ts'
 export type {
+  LayoutAxis,
+  LayoutBox,
+  LayoutBoxAxis,
+  LayoutEqualityProof,
+  LayoutExpression,
+  LayoutExpressionRange,
+  LayoutMetric,
   StaticLayoutAudit,
   StaticLayoutCheck,
   StaticLayoutConstraint,
