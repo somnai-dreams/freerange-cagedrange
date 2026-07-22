@@ -194,3 +194,46 @@ export function Page() {
     expect(report).toContain('test seams: 639, 640, 767, 768, 899, 900, 1023, 1024')
   })
 })
+
+describe('per-interval responsive evaluation', () => {
+  test('a responsive variant scopes the finding to its interval instead of conflicting', () => {
+    const scoped = audit(`<div className={active ? 'p-2' : 'p-2 md:p-4'} />`)
+    expect(scoped.findings).toHaveLength(1)
+    expect(scoped.findings[0]!.detail).toBe(
+      'state shifts layout from 768px: left inset +8px, right inset +8px, top inset +8px, bottom inset +8px',
+    )
+
+    // Below the threshold the branches agree; identical responsive tokens are not a conflict.
+    const identical = audit(`<div className={active ? 'p-2 md:p-4' : 'p-2 md:p-4'} />`)
+    expect(identical.findings).toEqual([])
+  })
+
+  test('max variants scope below the threshold and instance findings carry intervals', () => {
+    const below = audit(`<div className={active ? 'max-md:pl-4 pl-2' : 'pl-2'} />`)
+    expect(below.findings).toHaveLength(1)
+    expect(below.findings[0]!.detail).toContain('below 768px')
+
+    const instances = auditStateGeometrySource('Shell.tsx', `
+export function Shell({className}: {className: string}) {
+  return <div className={\`border-l \${className}\`} />
+}
+export function Page() {
+  return <>
+    <Shell className="p-1" />
+    <Shell className="p-1 md:border-l-0!" />
+  </>
+}
+`)
+    const instance = instances.findings.filter(finding => finding.kind === 'instanceGeometry')
+    expect(instance).toHaveLength(1)
+    expect(instance[0]!.detail).toContain('instances disagree from 768px')
+    expect(instance[0]!.severity).toBe('shift')
+  })
+
+  test('dark-mode variants compare as their own dimension instead of merging with the base', () => {
+    const dark = audit(`<div className={active ? 'border dark:border-2' : 'border'} />`)
+    expect(dark.findings).toHaveLength(1)
+    expect(dark.findings[0]!.detail).toContain("dark:border-width '2px' vs 'none'")
+    expect(dark.findings[0]!.detail).not.toContain('inset')
+  })
+})

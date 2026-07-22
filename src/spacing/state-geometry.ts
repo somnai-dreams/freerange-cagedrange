@@ -58,7 +58,7 @@ export type ComponentInstance = {
   component: string
   file: string
   line: number
-  box: BranchBox
+  tokens: string[]
 }
 
 const holeToken = '\u0000className'
@@ -210,6 +210,17 @@ function enclosingComponent(node: ts.Node): {name: string; props: Set<string>} |
 // media logic is not represented here, so the derived set is a lower bound.
 const tailwindScreens: Record<string, number> = {sm: 640, md: 768, lg: 1024, xl: 1280, '2xl': 1536}
 
+// A responsive variant gates a token to a width interval: min-style (sm, md, min-[Npx]) applies
+// at and above the threshold, max-style below it — Tailwind's max-md is width < 768px.
+export function responsiveGate(variant: string): {kind: 'min' | 'max'; px: number} | null {
+  const bare = variant.startsWith('max-') ? variant.slice(4) : variant
+  const screen = tailwindScreens[bare]
+  if (screen != null) return {kind: variant.startsWith('max-') ? 'max' : 'min', px: screen}
+  const arbitrary = /^(min|max)-\[(\d+(?:\.\d+)?)px\]$/.exec(variant)
+  if (arbitrary != null) return {kind: arbitrary[1] as 'min' | 'max', px: Number(arbitrary[2])}
+  return null
+}
+
 export type BreakpointUsage = {
   thresholdPx: number
   variants: Map<string, number>
@@ -315,12 +326,11 @@ export function collectComponentTemplates(sourceFile: ts.SourceFile, registry: C
     if (!extraction.branches.some(branch => branch.includes(holeToken))) return
     const ownBranch = (extraction.branches.find(branch => branch.includes(holeToken)) ?? [])
       .filter(token => token !== holeToken)
-    const ownBox = evaluateBranchBox(ownBranch)
     const template: ComponentTemplate = {
       file: sourceFile.fileName,
       branches: extraction.branches,
       complete: extraction.complete,
-      ownGeometry: new Set([...ownBox.cells.keys(), ...ownBox.categorical.keys()]),
+      ownGeometry: syntacticGeometryKeys(ownBranch),
     }
     registry.set(name, registry.has(name) ? 'ambiguous' : template)
   }
@@ -362,21 +372,22 @@ export function compareComponentInstances(
     const template = registry?.get(component)
     const ownGeometry = template != null && template !== 'ambiguous' ? template.ownGeometry : new Set<string>()
     for (let index = 1; index < list.length; index++) {
-      const difference = compareBranchBoxes(list[0]!.box, list[index]!.box)
-      if (difference == null) continue
-      const overridesTemplate = difference.keys.some(key => ownGeometry.has(key))
-      findings.push({
-        file: list[index]!.file,
-        line: list[index]!.line,
-        kind: 'instanceGeometry',
-        severity: overridesTemplate ? 'shift' : 'config',
-        evidence: overridesTemplate
-          ? "a call site overrides geometry the component itself declares"
-          : 'the difference is caller-owned sizing the template never declares',
-        magnitudePx: difference.magnitudePx,
-        detail: `<${component}> instances disagree (vs ${list[0]!.file}:${list[0]!.line}): `
-          + difference.detail.replace('state shifts layout: ', ''),
-      })
+      for (const difference of compareTokensAcrossIntervals(list[0]!.tokens, list[index]!.tokens)) {
+        const overridesTemplate = difference.keys.some(key => ownGeometry.has(key))
+        findings.push({
+          file: list[index]!.file,
+          line: list[index]!.line,
+          kind: 'instanceGeometry',
+          severity: overridesTemplate ? 'shift' : 'config',
+          evidence: overridesTemplate
+            ? 'a call site overrides geometry the component itself declares'
+            : 'the difference is caller-owned sizing the template never declares',
+          magnitudePx: difference.magnitudePx,
+          detail: `<${component}> instances disagree${difference.label == null ? '' : ` ${difference.label}`} `
+            + `(vs ${list[0]!.file}:${list[0]!.line}): `
+            + difference.detail.replace('state shifts layout: ', ''),
+        })
+      }
     }
   }
   return findings
@@ -452,7 +463,24 @@ function collectInstance(
   const templateBranch = template.branches.find(branch => branch.includes(holeToken)) ?? template.branches[0] ?? []
   const callBranch = callBranches[0] ?? []
   const effective = templateBranch.flatMap(token => token === holeToken ? callBranch : [token])
-  audit.instances.push({component, file: audit.file, line, box: evaluateBranchBox(effective)})
+  audit.instances.push({component, file: audit.file, line, tokens: effective})
+}
+
+// The geometry families a token list touches, independent of width or override resolution — the
+// component-ownership axis only needs to know which families the template itself speaks for.
+function syntacticGeometryKeys(tokens: string[]): Set<string> {
+  const keys = new Set<string>()
+  for (const token of tokens) {
+    const parsed = classifyToken(token)
+    if (parsed.kind !== 'geometry') continue
+    const spread = edgeSpread(parsed.family)
+    if (spread != null) {
+      for (const edge of spread.edges) keys.add(`${spread.group}:${edge}`)
+    } else {
+      keys.add(parsed.family)
+    }
+  }
+  return keys
 }
 
 function auditClassAttribute(
@@ -481,21 +509,24 @@ function auditClassAttribute(
   // literal branches is real regardless of any dynamic remainder. Branches are evaluated to local
   // box arithmetic, so token spellings that produce identical geometry (border p-4 vs p-[17px])
   // compare equal and compensated states are dismissed rather than flagged.
-  const boxes = branches.map(branch => evaluateBranchBox(branch))
-  for (let index = 1; index < boxes.length; index++) {
-    const difference = compareBranchBoxes(boxes[0]!, boxes[index]!)
-    if (difference != null) {
-      const {mobility, evidence} = classifyDiscriminants(conditions, attribute, sourceFile, propIndex)
+  for (let index = 1; index < branches.length; index++) {
+    const differences = compareTokensAcrossIntervals(branches[0]!, branches[index]!)
+    if (differences.length === 0) continue
+    const {mobility, evidence} = classifyDiscriminants(conditions, attribute, sourceFile, propIndex)
+    for (const difference of differences) {
       audit.findings.push({
         file: audit.file,
         line,
         kind: 'branchGeometry',
         severity: mobility === 'mobile' ? 'shift' : mobility === 'immobile' ? 'config' : 'unclear',
         evidence,
-        ...difference,
+        magnitudePx: difference.magnitudePx,
+        detail: difference.label == null
+          ? difference.detail
+          : difference.detail.replace('state shifts layout: ', `state shifts layout ${difference.label}: `),
       })
-      break
     }
+    break
   }
 
   for (const branch of branches) {
@@ -650,9 +681,12 @@ type BranchBox = {
 
 const edgeNames = ['left', 'right', 'top', 'bottom'] as const
 
-type EdgeCandidate = {px: number; important: boolean; specificity: number}
+// gateOrder models Tailwind's stylesheet ordering: media-variant blocks are emitted after the
+// base utilities, so a responsive token beats an ungated one in its interval; among responsive
+// tokens a higher threshold sorts later and wins.
+type EdgeCandidate = {px: number; important: boolean; specificity: number; gateOrder: number}
 
-export function evaluateBranchBox(tokens: string[]): BranchBox {
+export function evaluateBranchBox(tokens: string[], width: number | null = null): BranchBox {
   const box: BranchBox = {cells: new Map(), categorical: new Map()}
   // Candidates per property group and edge; groups then resolve independently and the edge total
   // sums the resolved groups, so `border p-4` adds while `border border-b-0` overrides.
@@ -661,6 +695,24 @@ export function evaluateBranchBox(tokens: string[]): BranchBox {
     const parsed = classifyToken(token)
     if (parsed.kind !== 'geometry') continue
     if (parsed.variants.some(variant => stateVariantPattern.test(variant))) continue
+    // Responsive variants gate the token to the evaluation width. Variants that are neither state
+    // nor responsive (dark:, ltr:, print:), including mixed prefixes, keep their token out of the
+    // width cells and compare as their own categorical dimension instead of merging with the base.
+    const gates = parsed.variants.map(variant => responsiveGate(variant))
+    if (gates.some(gate => gate == null) && parsed.variants.length > 0) {
+      const key = `${parsed.variants.join(':')}:${parsed.family}`
+      const normalized = pixelsOf(parsed.family, parsed.value)
+      box.categorical.set(key, normalized == null ? parsed.value : `${trim(normalized)}px`)
+      continue
+    }
+    let gateOrder = 0
+    if (gates.length > 0) {
+      if (width == null) continue
+      const applies = gates.every(gate =>
+        gate!.kind === 'min' ? width >= gate!.px : width < gate!.px)
+      if (!applies) continue
+      gateOrder = Math.max(...gates.map(gate => gate!.px))
+    }
     const spread = edgeSpread(parsed.family)
     const px = pixelsOf(parsed.family, parsed.value)
     if (spread != null && px != null) {
@@ -671,7 +723,7 @@ export function evaluateBranchBox(tokens: string[]): BranchBox {
       for (const edge of spread.edges) {
         const key = `${spread.group}:${edge}`
         const cell = cells.get(key)
-        const candidate = {px: spread.negative ? -px : px, important: parsed.important, specificity}
+        const candidate = {px: spread.negative ? -px : px, important: parsed.important, specificity, gateOrder}
         if (cell == null) cells.set(key, [candidate])
         else cell.push(candidate)
       }
@@ -687,12 +739,71 @@ export function evaluateBranchBox(tokens: string[]): BranchBox {
   return box
 }
 
+// Thresholds declared by the tokens under comparison; the representatives sample one width per
+// interval, including just below the lowest threshold.
+export function tokenThresholds(tokenLists: string[][]): number[] {
+  const thresholds = new Set<number>()
+  for (const tokens of tokenLists) {
+    for (const token of tokens) {
+      for (const variant of classifyToken(token).variants) {
+        const gate = responsiveGate(variant)
+        if (gate != null) thresholds.add(gate.px)
+      }
+    }
+  }
+  return [...thresholds].sort((left, right) => left - right)
+}
+
+type IntervalDifference = {label: string | null; detail: string; magnitudePx: number | null; keys: string[]}
+
+// Compare two token sets at every declared width interval and merge intervals whose differences
+// read identically. A difference present at every width keeps no label, matching the
+// width-independent report format.
+function compareTokensAcrossIntervals(baseTokens: string[], otherTokens: string[]): IntervalDifference[] {
+  const thresholds = tokenThresholds([baseTokens, otherTokens])
+  if (thresholds.length === 0) {
+    const difference = compareBranchBoxes(evaluateBranchBox(baseTokens), evaluateBranchBox(otherTokens))
+    return difference == null ? [] : [{label: null, ...difference}]
+  }
+  const representatives = [thresholds[0]! - 1, ...thresholds]
+  const perRepresentative = representatives.map(width =>
+    compareBranchBoxes(evaluateBranchBox(baseTokens, width), evaluateBranchBox(otherTokens, width)))
+  if (perRepresentative.every(difference => difference == null)) return []
+  const uniform = perRepresentative.every(difference =>
+    difference != null && difference.detail === perRepresentative[0]?.detail)
+  if (uniform) return [{label: null, ...perRepresentative[0]!}]
+
+  const labelFor = (startIndex: number, endIndex: number): string => {
+    const from = startIndex === 0 ? null : representatives[startIndex]!
+    const to = endIndex === representatives.length - 1 ? null : thresholds[endIndex]!
+    if (from == null && to != null) return `below ${to}px`
+    if (from != null && to == null) return `from ${from}px`
+    return `${from}–${to! - 1}px`
+  }
+  const merged: IntervalDifference[] = []
+  let runStart = 0
+  for (let index = 1; index <= perRepresentative.length; index++) {
+    const current = index < perRepresentative.length ? perRepresentative[index] : undefined
+    const previous = perRepresentative[runStart]
+    const same = index < perRepresentative.length
+      && (current?.detail ?? null) === (previous?.detail ?? null)
+    if (same) continue
+    if (previous != null) {
+      merged.push({label: labelFor(runStart, index - 1), ...previous})
+    }
+    runStart = index
+  }
+  return merged
+}
+
 function resolveCell(candidates: EdgeCandidate[]): number | null {
   const importantValues = new Set(candidates.filter(candidate => candidate.important).map(candidate => candidate.px))
   if (importantValues.size === 1) return [...importantValues][0]!
   if (importantValues.size > 1) return null
-  const top = Math.max(...candidates.map(candidate => candidate.specificity))
-  const values = new Set(candidates.filter(candidate => candidate.specificity === top).map(candidate => candidate.px))
+  const topGate = Math.max(...candidates.map(candidate => candidate.gateOrder))
+  const gated = candidates.filter(candidate => candidate.gateOrder === topGate)
+  const top = Math.max(...gated.map(candidate => candidate.specificity))
+  const values = new Set(gated.filter(candidate => candidate.specificity === top).map(candidate => candidate.px))
   return values.size === 1 ? [...values][0]! : null
 }
 
