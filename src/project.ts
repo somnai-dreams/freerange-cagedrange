@@ -15,7 +15,14 @@ import type {SiteID} from './ir/ids.ts'
 import {reportPath, siteLocation} from './ir/program.ts'
 import {formatUnsupportedReason} from './report/index.ts'
 import {auditSpacingFile, auditSpacingSource} from './spacing/audit.ts'
-import {auditStateGeometryFile, auditStateGeometrySource, formatStateGeometryReport} from './spacing/state-geometry.ts'
+import {
+  auditStateGeometryFile,
+  auditStateGeometrySource,
+  collectComponentTemplates,
+  compareComponentInstances,
+  formatStateGeometryReport,
+  type ComponentRegistry,
+} from './spacing/state-geometry.ts'
 import type {SpacingFileAudit, SpacingReportOptions} from './spacing/model.ts'
 import {formatSpacingReport} from './spacing/report.ts'
 import {checkFile} from './typescript/check.ts'
@@ -135,8 +142,13 @@ export function runProjectStateGeometry(searchFrom: string): boolean {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
   }
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
-  const audits = graph.sources.map(source => auditStateGeometryFile(source.sourceFile))
-  console.log(formatStateGeometryReport(audits))
+  // Templates first so a call site anywhere in the project can compare against a component
+  // defined in another file; duplicate component names become ambiguous and make no claim.
+  const registry: ComponentRegistry = new Map()
+  for (const source of graph.sources) collectComponentTemplates(source.sourceFile, registry)
+  const audits = graph.sources.map(source => auditStateGeometryFile(source.sourceFile, registry))
+  const instanceFindings = compareComponentInstances(audits.flatMap(audit => audit.instances))
+  console.log(formatStateGeometryReport(audits, instanceFindings))
   return false
 }
 
@@ -153,7 +165,10 @@ export function runFileStateGeometry(file: string): boolean {
   if (source == null) {
     throw new Error(`File is not part of the project resolved from ${configPath}: ${absoluteFile}`)
   }
-  console.log(formatStateGeometryReport([auditStateGeometryFile(source.sourceFile)]))
+  const registry: ComponentRegistry = new Map()
+  for (const projectSource of graph.sources) collectComponentTemplates(projectSource.sourceFile, registry)
+  const audit = auditStateGeometryFile(source.sourceFile, registry)
+  console.log(formatStateGeometryReport([audit], compareComponentInstances(audit.instances)))
   return false
 }
 

@@ -76,6 +76,43 @@ describe('state-variant geometry scan', () => {
     expect(sharedConflict.findings).toEqual([])
   })
 
+  test('sibling instantiations of a component compare through the className splice', () => {
+    // The mj sidebar bug shape: the shell always declares border-l, one call site strips it with
+    // an important override, the other passes only dynamic classes. The two instances disagree by
+    // exactly the border width.
+    const source = `
+export function Shell({className}: {className: string}) {
+  return <div className={\`absolute border-l border-light-100 \${className}\`} />
+}
+export function Page({transition}: {transition: string}) {
+  return <>
+    <Shell className={\`overflow-hidden! border-l-0! \${transition}\`} />
+    <Shell className={transition} />
+  </>
+}
+`
+    const result = auditStateGeometrySource('Shell.tsx', source)
+    const instance = result.findings.filter(finding => finding.kind === 'instanceGeometry')
+    expect(instance).toHaveLength(1)
+    expect(instance[0]!.detail).toContain('<Shell> instances disagree')
+    expect(instance[0]!.detail).toContain('left inset +1px')
+    expect(instance[0]!.magnitudePx).toBe(1)
+
+    // Call sites differing only in paint make no instance claim.
+    const painted = auditStateGeometrySource('Shell.tsx', `
+export function Shell({className}: {className: string}) {
+  return <div className={\`border \${className}\`} />
+}
+export function Page() {
+  return <>
+    <Shell className="border-light-100" />
+    <Shell className="border-dark-750" />
+  </>
+}
+`)
+    expect(painted.findings.filter(finding => finding.kind === 'instanceGeometry')).toEqual([])
+  })
+
   test('classifies border tokens by whether the value is a length', () => {
     expect(classifyToken('border')).toMatchObject({kind: 'geometry', family: 'border-width', value: '1'})
     expect(classifyToken('border-t-2')).toMatchObject({kind: 'geometry', family: 'border-width-t', value: '2'})

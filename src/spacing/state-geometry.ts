@@ -10,9 +10,10 @@ import * as ts from 'typescript'
 export type StateGeometryFinding = {
   file: string
   line: number
-  kind: 'branchGeometry' | 'variantGeometry'
+  kind: 'branchGeometry' | 'variantGeometry' | 'instanceGeometry'
   // branchGeometry: two extracted branches evaluate to different local box geometry.
   // variantGeometry: a state-variant token adds or changes geometry with no matching base token.
+  // instanceGeometry: two call sites of the same component evaluate to different effective boxes.
   detail: string
   // Largest per-edge pixel delta when the difference is quantifiable, null for categorical
   // changes (display, position, symbolic sizes). Reports rank by magnitude.
@@ -29,6 +30,102 @@ export type StateGeometryFileAudit = {
   file: string
   findings: StateGeometryFinding[]
   coverage: StateGeometryCoverage[]
+  instances: ComponentInstance[]
+}
+
+// A component whose className prop splices into exactly one className attribute — the ubiquitous
+// `${className}` pattern — can have its call sites' effective boxes compared. Components applying
+// className any other way are simply not registered: no cross-instance claim is made either way.
+export type ComponentTemplate = {
+  file: string
+  branches: string[][]
+  complete: boolean
+}
+
+export type ComponentRegistry = Map<string, ComponentTemplate | 'ambiguous'>
+
+export type ComponentInstance = {
+  component: string
+  file: string
+  line: number
+  box: BranchBox
+}
+
+const holeToken = '\u0000className'
+
+export function collectComponentTemplates(sourceFile: ts.SourceFile, registry: ComponentRegistry): void {
+  const register = (name: string, body: ts.Node): void => {
+    if (!/^[A-Z]/.test(name)) return
+    const attributes: ts.JsxAttribute[] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name)
+        && (node.name.text === 'className' || node.name.text === 'class')
+        && node.initializer != null && ts.isJsxExpression(node.initializer)
+        && node.initializer.expression != null
+        && expressionMentionsIdentifier(node.initializer.expression, 'className')) {
+        attributes.push(node)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(body)
+    if (attributes.length !== 1) return
+    const initializer = attributes[0]!.initializer
+    if (initializer == null || !ts.isJsxExpression(initializer) || initializer.expression == null) return
+    const extraction = extractBranches(initializer.expression, 'className')
+    if (!extraction.branches.some(branch => branch.includes(holeToken))) return
+    const template: ComponentTemplate = {
+      file: sourceFile.fileName,
+      branches: extraction.branches,
+      complete: extraction.complete,
+    }
+    registry.set(name, registry.has(name) ? 'ambiguous' : template)
+  }
+  const visitTop = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name != null && node.body != null) {
+      register(node.name.text, node.body)
+    } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer != null
+      && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+      register(node.name.text, node.initializer)
+    }
+    ts.forEachChild(node, visitTop)
+  }
+  visitTop(sourceFile)
+}
+
+function expressionMentionsIdentifier(expression: ts.Node, name: string): boolean {
+  if (ts.isIdentifier(expression) && expression.text === name) return true
+  let found = false
+  ts.forEachChild(expression, child => {
+    if (!found && expressionMentionsIdentifier(child, name)) found = true
+  })
+  return found
+}
+
+// Cross-instance comparison over the collected call sites: every instance compares against the
+// first, so one divergent call site is one finding.
+export function compareComponentInstances(instances: ComponentInstance[]): StateGeometryFinding[] {
+  const byComponent = new Map<string, ComponentInstance[]>()
+  for (const instance of instances) {
+    const list = byComponent.get(instance.component)
+    if (list == null) byComponent.set(instance.component, [instance])
+    else list.push(instance)
+  }
+  const findings: StateGeometryFinding[] = []
+  for (const [component, list] of byComponent) {
+    for (let index = 1; index < list.length; index++) {
+      const difference = compareBranchBoxes(list[0]!.box, list[index]!.box)
+      if (difference == null) continue
+      findings.push({
+        file: list[index]!.file,
+        line: list[index]!.line,
+        kind: 'instanceGeometry',
+        magnitudePx: difference.magnitudePx,
+        detail: `<${component}> instances disagree (vs ${list[0]!.file}:${list[0]!.line}): `
+          + difference.detail.replace('state shifts layout: ', ''),
+      })
+    }
+  }
+  return findings
 }
 
 const classCombinerNames = new Set(['cn', 'clsx', 'cx', 'classnames', 'twmerge', 'twjoin'])
@@ -36,20 +133,66 @@ const stateVariantPattern = /^(hover|focus|focus-visible|focus-within|active|vis
 const branchLimit = 16
 
 export function auditStateGeometrySource(file: string, source: string): StateGeometryFileAudit {
-  return auditStateGeometryFile(ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX))
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const registry: ComponentRegistry = new Map()
+  collectComponentTemplates(sourceFile, registry)
+  const audit = auditStateGeometryFile(sourceFile, registry)
+  audit.findings.push(...compareComponentInstances(audit.instances))
+  return audit
 }
 
-export function auditStateGeometryFile(sourceFile: ts.SourceFile): StateGeometryFileAudit {
-  const audit: StateGeometryFileAudit = {file: sourceFile.fileName, findings: [], coverage: []}
+export function auditStateGeometryFile(sourceFile: ts.SourceFile, registry?: ComponentRegistry): StateGeometryFileAudit {
+  const audit: StateGeometryFileAudit = {file: sourceFile.fileName, findings: [], coverage: [], instances: []}
   const visit = (node: ts.Node): void => {
     if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name)
       && (node.name.text === 'className' || node.name.text === 'class')) {
       auditClassAttribute(node, sourceFile, audit)
     }
+    if (registry != null && (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
+      && ts.isIdentifier(node.tagName)) {
+      const template = registry.get(node.tagName.text)
+      if (template != null && template !== 'ambiguous') {
+        collectInstance(node, node.tagName.text, template, sourceFile, audit)
+      }
+    }
     ts.forEachChild(node, visit)
   }
   visit(sourceFile)
   return audit
+}
+
+function collectInstance(
+  element: ts.JsxSelfClosingElement | ts.JsxOpeningElement,
+  component: string,
+  template: ComponentTemplate,
+  sourceFile: ts.SourceFile,
+  audit: StateGeometryFileAudit,
+): void {
+  const line = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile)).line + 1
+  const attribute = element.attributes.properties.find(property =>
+    ts.isJsxAttribute(property) && ts.isIdentifier(property.name) && property.name.text === 'className')
+  let callBranches: string[][] = [[]]
+  if (attribute != null && ts.isJsxAttribute(attribute) && attribute.initializer != null) {
+    const initializer = attribute.initializer
+    const expression = ts.isStringLiteral(initializer)
+      ? initializer
+      : ts.isJsxExpression(initializer) && initializer.expression != null
+        ? initializer.expression
+        : null
+    if (expression != null) {
+      const extraction = extractBranches(expression)
+      callBranches = extraction.branches
+      if (!extraction.complete) {
+        audit.coverage.push({file: audit.file, line, reason: 'dynamicClassPart'})
+      }
+    }
+  }
+  // Representative box: the first template branch with the first call-site branch substituted at
+  // the hole. Call-site conditionals are already covered by the per-expression analysis.
+  const templateBranch = template.branches.find(branch => branch.includes(holeToken)) ?? template.branches[0] ?? []
+  const callBranch = callBranches[0] ?? []
+  const effective = templateBranch.flatMap(token => token === holeToken ? callBranch : [token])
+  audit.instances.push({component, file: audit.file, line, box: evaluateBranchBox(effective)})
 }
 
 function auditClassAttribute(
@@ -121,36 +264,39 @@ function auditClassAttribute(
 
 type BranchExtraction = {branches: string[][]; complete: boolean; overflow: boolean}
 
-function extractBranches(expression: ts.Expression): BranchExtraction {
-  if (ts.isParenthesizedExpression(expression)) return extractBranches(expression.expression)
+function extractBranches(expression: ts.Expression, holeName?: string): BranchExtraction {
+  if (holeName != null && ts.isIdentifier(expression) && expression.text === holeName) {
+    return {branches: [[holeToken]], complete: true, overflow: false}
+  }
+  if (ts.isParenthesizedExpression(expression)) return extractBranches(expression.expression, holeName)
   if (ts.isStringLiteralLike(expression)) return single(expression.text)
   if (ts.isConditionalExpression(expression)) {
-    return unionOf([extractBranches(expression.whenTrue), extractBranches(expression.whenFalse)])
+    return unionOf([extractBranches(expression.whenTrue, holeName), extractBranches(expression.whenFalse, holeName)])
   }
   if (ts.isBinaryExpression(expression)) {
     const operator = expression.operatorToken.kind
     if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
-      return unionOf([extractBranches(expression.right), single('')])
+      return unionOf([extractBranches(expression.right, holeName), single('')])
     }
     if (operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken) {
-      return unionOf([extractBranches(expression.left), extractBranches(expression.right)])
+      return unionOf([extractBranches(expression.left, holeName), extractBranches(expression.right, holeName)])
     }
     if (operator === ts.SyntaxKind.PlusToken) {
-      return crossProduct([extractBranches(expression.left), extractBranches(expression.right)])
+      return crossProduct([extractBranches(expression.left, holeName), extractBranches(expression.right, holeName)])
     }
     return dynamic()
   }
   if (ts.isTemplateExpression(expression)) {
     const parts: BranchExtraction[] = [single(expression.head.text)]
     for (const span of expression.templateSpans) {
-      parts.push(extractBranches(span.expression))
+      parts.push(extractBranches(span.expression, holeName))
       parts.push(single(span.literal.text))
     }
     return crossProduct(parts)
   }
   if (ts.isCallExpression(expression) && ts.isIdentifier(expression.expression)
     && classCombinerNames.has(expression.expression.text.toLowerCase())) {
-    return crossProduct(expression.arguments.map(argument => extractBranches(argument)))
+    return crossProduct(expression.arguments.map(argument => extractBranches(argument, holeName)))
   }
   if (ts.isObjectLiteralExpression(expression)) {
     const parts: BranchExtraction[] = []
@@ -384,6 +530,7 @@ const paintRoots = new Set(['bg', 'rounded', 'ring', 'outline', 'shadow', 'opaci
 const spacingRoots = new Set(['p', 'px', 'py', 'pt', 'pr', 'pb', 'pl', 'ps', 'pe', 'm', 'mx', 'my', 'mt', 'mr', 'mb', 'ml', 'ms', 'me', 'gap', 'gap-x', 'gap-y', 'space-x', 'space-y', 'w', 'h', 'size', 'min-w', 'min-h', 'max-w', 'max-h', 'inset', 'inset-x', 'inset-y', 'top', 'right', 'bottom', 'left', 'start', 'end', 'leading', 'basis', 'indent', 'translate-x', 'translate-y'])
 
 export function classifyToken(rawToken: string): TokenClassification {
+  if (rawToken === holeToken) return {kind: 'unknown', family: 'className-hole', value: '', variants: [], important: false}
   const segments = rawToken.split(':')
   let utility = segments[segments.length - 1]!
   const variants = segments.slice(0, -1)
@@ -438,12 +585,20 @@ export function classifyToken(rawToken: string): TokenClassification {
   return {kind: 'unknown', family: root, value, variants, important}
 }
 
-export function formatStateGeometryReport(audits: StateGeometryFileAudit[]): string {
-  const all = audits.flatMap(audit => audit.findings)
+export function formatStateGeometryReport(
+  audits: StateGeometryFileAudit[],
+  instanceFindings: StateGeometryFinding[] = [],
+): string {
+  const all = [...audits.flatMap(audit => audit.findings), ...instanceFindings]
   // Quantified shifts first, largest movement on top; categorical changes after.
   all.sort((left, right) => (right.magnitudePx ?? -1) - (left.magnitudePx ?? -1))
-  const lines = all.map(finding =>
-    `${finding.file}:${finding.line} ${finding.kind === 'branchGeometry' ? 'state changes geometry' : 'state variant changes geometry'}: ${finding.detail}`)
+  const kindText = (finding: StateGeometryFinding): string =>
+    finding.kind === 'branchGeometry'
+      ? 'state changes geometry'
+      : finding.kind === 'variantGeometry'
+        ? 'state variant changes geometry'
+        : 'component instances disagree on geometry'
+  const lines = all.map(finding => `${finding.file}:${finding.line} ${kindText(finding)}: ${finding.detail}`)
   const coverage = audits.reduce((total, audit) => total + audit.coverage.length, 0)
   lines.push(`state geometry: ${all.length} finding${all.length === 1 ? '' : 's'}; ${coverage} expression${coverage === 1 ? '' : 's'} partly dynamic`)
   return lines.join('\n')
