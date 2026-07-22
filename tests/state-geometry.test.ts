@@ -12,11 +12,16 @@ describe('state-variant geometry scan', () => {
     const shifting = audit(`<button className={active ? 'border border-light-300' : ''} />`)
     expect(shifting.findings).toHaveLength(1)
     expect(shifting.findings[0]).toMatchObject({kind: 'branchGeometry'})
-    expect(shifting.findings[0]!.detail).toContain('border-width=1')
+    expect(shifting.findings[0]!.detail).toContain('left inset -1px')
+    expect(shifting.findings[0]!.magnitudePx).toBe(1)
 
     const reserved = audit("<button className={`border ${active ? 'border-light-300' : 'border-transparent'}`} />")
     expect(reserved.findings).toEqual([])
     expect(reserved.coverage).toEqual([])
+
+    // Different spellings, identical geometry: 1px border + 16px padding vs 17px padding.
+    const compensated = audit(`<button className={active ? 'border p-4' : 'p-[17px]'} />`)
+    expect(compensated.findings).toEqual([])
   })
 
   test('a state-variant token adding or changing geometry is a finding; paint variants are clean', () => {

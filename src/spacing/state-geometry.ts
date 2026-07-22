@@ -11,9 +11,12 @@ export type StateGeometryFinding = {
   file: string
   line: number
   kind: 'branchGeometry' | 'variantGeometry'
-  // branchGeometry: geometry token sets of two extracted branches differ.
+  // branchGeometry: two extracted branches evaluate to different local box geometry.
   // variantGeometry: a state-variant token adds or changes geometry with no matching base token.
   detail: string
+  // Largest per-edge pixel delta when the difference is quantifiable, null for categorical
+  // changes (display, position, symbolic sizes). Reports rank by magnitude.
+  magnitudePx: number | null
 }
 
 export type StateGeometryCoverage = {
@@ -70,16 +73,14 @@ function auditClassAttribute(
   const branches = extraction.branches.slice(0, branchLimit)
 
   // Findings still come from the branches that were extracted: a geometry delta between two
-  // literal branches is real regardless of any dynamic remainder.
-  const geometryKeys = branches.map(branch => baseGeometryKey(branch))
-  for (let index = 1; index < geometryKeys.length; index++) {
-    if (geometryKeys[index] !== geometryKeys[0]) {
-      audit.findings.push({
-        file: audit.file,
-        line,
-        kind: 'branchGeometry',
-        detail: `branches disagree on geometry: [${geometryKeys[0] === '' ? 'none' : geometryKeys[0]!}] vs [${geometryKeys[index] === '' ? 'none' : geometryKeys[index]!}]`,
-      })
+  // literal branches is real regardless of any dynamic remainder. Branches are evaluated to local
+  // box arithmetic, so token spellings that produce identical geometry (border p-4 vs p-[17px])
+  // compare equal and compensated states are dismissed rather than flagged.
+  const boxes = branches.map(branch => evaluateBranchBox(branch))
+  for (let index = 1; index < boxes.length; index++) {
+    const difference = compareBranchBoxes(boxes[0]!, boxes[index]!)
+    if (difference != null) {
+      audit.findings.push({file: audit.file, line, kind: 'branchGeometry', ...difference})
       break
     }
   }
@@ -101,12 +102,17 @@ function auditClassAttribute(
       if (reported.has(key)) continue
       reported.add(key)
       const base = baseFamilies.get(parsed.family)
+      const variantPx = pixelsOf(parsed.family, parsed.value)
+      const basePx = base == null ? 0 : pixelsOf(parsed.family, base)
+      const magnitudePx = variantPx != null && basePx != null ? Math.abs(variantPx - basePx) : null
+      if (magnitudePx === 0) continue
       audit.findings.push({
         file: audit.file,
         line,
         kind: 'variantGeometry',
+        magnitudePx,
         detail: base == null
-          ? `'${token}' adds ${parsed.family} on a state with no base reservation`
+          ? `'${token}' adds ${parsed.family}${variantPx == null ? '' : ` (+${trim(variantPx)}px)`} on a state with no base reservation`
           : `'${token}' changes ${parsed.family} from the base '${base}' on a state`,
       })
     }
@@ -196,15 +202,123 @@ function crossProduct(parts: BranchExtraction[]): BranchExtraction {
   return {branches, complete: parts.every(part => part.complete) && !overflow, overflow}
 }
 
-function baseGeometryKey(tokens: string[]): string {
-  const families = new Map<string, string>()
+// Local box arithmetic per branch: border, padding, and margin resolve to pixels per physical
+// edge through the Tailwind scale, so compensated spellings compare equal. Families the scale
+// cannot quantify (display, position, symbolic sizes, unparsed values) stay categorical and are
+// compared as normalized strings — a difference is still a finding, just unranked.
+type BranchBox = {
+  edges: {left: number; right: number; top: number; bottom: number}
+  margins: {left: number; right: number; top: number; bottom: number}
+  categorical: Map<string, string>
+}
+
+const edgeNames = ['left', 'right', 'top', 'bottom'] as const
+
+function evaluateBranchBox(tokens: string[]): BranchBox {
+  const box: BranchBox = {
+    edges: {left: 0, right: 0, top: 0, bottom: 0},
+    margins: {left: 0, right: 0, top: 0, bottom: 0},
+    categorical: new Map(),
+  }
   for (const token of tokens) {
     const parsed = classifyToken(token)
-    if (parsed.kind === 'geometry' && parsed.variants.every(variant => !stateVariantPattern.test(variant))) {
-      families.set(`${parsed.variants.join(':')}${parsed.variants.length > 0 ? ':' : ''}${parsed.family}`, parsed.value)
+    if (parsed.kind !== 'geometry') continue
+    if (parsed.variants.some(variant => stateVariantPattern.test(variant))) continue
+    const spread = edgeSpread(parsed.family)
+    const px = pixelsOf(parsed.family, parsed.value)
+    if (spread != null && px != null) {
+      const target = spread.kind === 'margin' ? box.margins : box.edges
+      for (const edge of spread.edges) target[edge] += spread.negative ? -px : px
+      continue
+    }
+    const key = `${parsed.variants.join(':')}${parsed.variants.length > 0 ? ':' : ''}${parsed.family}`
+    const normalized = pixelsOf(parsed.family, parsed.value)
+    box.categorical.set(key, normalized == null ? parsed.value : `${trim(normalized)}px`)
+  }
+  return box
+}
+
+function compareBranchBoxes(
+  base: BranchBox,
+  other: BranchBox,
+): {detail: string; magnitudePx: number | null} | null {
+  const shifts: string[] = []
+  let magnitude = 0
+  for (const edge of edgeNames) {
+    const inset = other.edges[edge] - base.edges[edge]
+    if (inset !== 0) {
+      shifts.push(`${edge} inset ${signed(inset)}px`)
+      magnitude = Math.max(magnitude, Math.abs(inset))
+    }
+    const margin = other.margins[edge] - base.margins[edge]
+    if (margin !== 0) {
+      shifts.push(`${edge} margin ${signed(margin)}px`)
+      magnitude = Math.max(magnitude, Math.abs(margin))
     }
   }
-  return [...families.entries()].map(([family, value]) => `${family}=${value}`).sort().join(' ')
+  const categorical: string[] = []
+  const families = new Set([...base.categorical.keys(), ...other.categorical.keys()])
+  for (const family of [...families].sort()) {
+    const from = base.categorical.get(family)
+    const to = other.categorical.get(family)
+    if (from !== to) categorical.push(`${family} '${from ?? 'none'}' vs '${to ?? 'none'}'`)
+  }
+  if (shifts.length === 0 && categorical.length === 0) return null
+  const parts = [...shifts, ...categorical]
+  return {
+    detail: `state shifts layout: ${parts.join(', ')}`,
+    magnitudePx: shifts.length > 0 ? magnitude : null,
+  }
+}
+
+type EdgeSpread = {kind: 'inset' | 'margin'; edges: readonly (typeof edgeNames)[number][]; negative: boolean}
+
+function edgeSpread(family: string): EdgeSpread | null {
+  const negative = family.startsWith('-')
+  const bare = negative ? family.slice(1) : family
+  const insetMap: Record<string, readonly (typeof edgeNames)[number][]> = {
+    'border-width': edgeNames, 'border-width-x': ['left', 'right'], 'border-width-y': ['top', 'bottom'],
+    'border-width-l': ['left'], 'border-width-r': ['right'], 'border-width-t': ['top'], 'border-width-b': ['bottom'],
+    'border-width-s': ['left'], 'border-width-e': ['right'],
+    p: edgeNames, px: ['left', 'right'], py: ['top', 'bottom'],
+    pl: ['left'], pr: ['right'], pt: ['top'], pb: ['bottom'], ps: ['left'], pe: ['right'],
+  }
+  const marginMap: Record<string, readonly (typeof edgeNames)[number][]> = {
+    m: edgeNames, mx: ['left', 'right'], my: ['top', 'bottom'],
+    ml: ['left'], mr: ['right'], mt: ['top'], mb: ['bottom'], ms: ['left'], me: ['right'],
+  }
+  const inset = insetMap[bare]
+if (inset != null) return {kind: 'inset', edges: inset, negative}
+  const margin = marginMap[bare]
+if (margin != null) return {kind: 'margin', edges: margin, negative}
+  return null
+}
+
+// Tailwind's default numeric scale is 4px per step; border widths default to 1px. Values outside
+// the modeled forms return null and stay categorical rather than being guessed.
+function pixelsOf(family: string, value: string): number | null {
+  const bareFamily = family.startsWith('-') ? family.slice(1) : family
+  if (bareFamily.startsWith('border-width')) {
+    if (value === '' || value === '1') return value === '' ? 1 : 1
+    if (/^\d+$/.test(value)) return Number(value)
+    const arbitrary = /^\[(\d+(?:\.\d+)?)px\]$/.exec(value)
+    return arbitrary == null ? null : Number(arbitrary[1])
+  }
+  if (value === 'px') return 1
+  if (/^\d+(\.\d+)?$/.test(value)) return Number(value) * 4
+  const arbitraryPx = /^\[(\d+(?:\.\d+)?)px\]$/.exec(value)
+  if (arbitraryPx != null) return Number(arbitraryPx[1])
+  const arbitraryRem = /^\[(\d+(?:\.\d+)?)rem\]$/.exec(value)
+  if (arbitraryRem != null) return Number(arbitraryRem[1]) * 16
+  return null
+}
+
+function signed(value: number): string {
+  return value > 0 ? `+${trim(value)}` : `${trim(value)}`
+}
+
+function trim(value: number): string {
+  return `${Number(value.toFixed(3))}`
 }
 
 type TokenClassification = {
@@ -268,16 +382,12 @@ export function classifyToken(rawToken: string): TokenClassification {
 }
 
 export function formatStateGeometryReport(audits: StateGeometryFileAudit[]): string {
-  const lines: string[] = []
-  let findings = 0
-  let coverage = 0
-  for (const audit of audits) {
-    for (const finding of audit.findings) {
-      findings++
-      lines.push(`${finding.file}:${finding.line} ${finding.kind === 'branchGeometry' ? 'state changes geometry' : 'state variant changes geometry'}: ${finding.detail}`)
-    }
-    coverage += audit.coverage.length
-  }
-  lines.push(`state geometry: ${findings} finding${findings === 1 ? '' : 's'}; ${coverage} expression${coverage === 1 ? '' : 's'} partly dynamic`)
+  const all = audits.flatMap(audit => audit.findings)
+  // Quantified shifts first, largest movement on top; categorical changes after.
+  all.sort((left, right) => (right.magnitudePx ?? -1) - (left.magnitudePx ?? -1))
+  const lines = all.map(finding =>
+    `${finding.file}:${finding.line} ${finding.kind === 'branchGeometry' ? 'state changes geometry' : 'state variant changes geometry'}: ${finding.detail}`)
+  const coverage = audits.reduce((total, audit) => total + audit.coverage.length, 0)
+  lines.push(`state geometry: ${all.length} finding${all.length === 1 ? '' : 's'}; ${coverage} expression${coverage === 1 ? '' : 's'} partly dynamic`)
   return lines.join('\n')
 }
