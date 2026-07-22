@@ -206,20 +206,22 @@ function crossProduct(parts: BranchExtraction[]): BranchExtraction {
 // edge through the Tailwind scale, so compensated spellings compare equal. Families the scale
 // cannot quantify (display, position, symbolic sizes, unparsed values) stay categorical and are
 // compared as normalized strings — a difference is still a finding, just unranked.
+// cells: resolved pixels per property group and edge (`border:left`), null when equally
+// targeted utilities disagree and stylesheet order would decide — an honest unknown.
 type BranchBox = {
-  edges: {left: number; right: number; top: number; bottom: number}
-  margins: {left: number; right: number; top: number; bottom: number}
+  cells: Map<string, number | null>
   categorical: Map<string, string>
 }
 
 const edgeNames = ['left', 'right', 'top', 'bottom'] as const
 
-function evaluateBranchBox(tokens: string[]): BranchBox {
-  const box: BranchBox = {
-    edges: {left: 0, right: 0, top: 0, bottom: 0},
-    margins: {left: 0, right: 0, top: 0, bottom: 0},
-    categorical: new Map(),
-  }
+type EdgeCandidate = {px: number; important: boolean; specificity: number}
+
+export function evaluateBranchBox(tokens: string[]): BranchBox {
+  const box: BranchBox = {cells: new Map(), categorical: new Map()}
+  // Candidates per property group and edge; groups then resolve independently and the edge total
+  // sums the resolved groups, so `border p-4` adds while `border border-b-0` overrides.
+  const cells = new Map<string, EdgeCandidate[]>()
   for (const token of tokens) {
     const parsed = classifyToken(token)
     if (parsed.kind !== 'geometry') continue
@@ -227,15 +229,36 @@ function evaluateBranchBox(tokens: string[]): BranchBox {
     const spread = edgeSpread(parsed.family)
     const px = pixelsOf(parsed.family, parsed.value)
     if (spread != null && px != null) {
-      const target = spread.kind === 'margin' ? box.margins : box.edges
-      for (const edge of spread.edges) target[edge] += spread.negative ? -px : px
+      // Tailwind orders all-edge utilities before axis pairs before single edges, so a more
+      // targeted utility deterministically wins its edges; equal targeting with distinct values
+      // depends on stylesheet order and stays unresolved.
+      const specificity = spread.edges.length === 4 ? 0 : spread.edges.length === 2 ? 1 : 2
+      for (const edge of spread.edges) {
+        const key = `${spread.group}:${edge}`
+        const cell = cells.get(key)
+        const candidate = {px: spread.negative ? -px : px, important: parsed.important, specificity}
+        if (cell == null) cells.set(key, [candidate])
+        else cell.push(candidate)
+      }
       continue
     }
     const key = `${parsed.variants.join(':')}${parsed.variants.length > 0 ? ':' : ''}${parsed.family}`
     const normalized = pixelsOf(parsed.family, parsed.value)
     box.categorical.set(key, normalized == null ? parsed.value : `${trim(normalized)}px`)
   }
+  for (const [key, candidates] of cells) {
+    box.cells.set(key, resolveCell(candidates))
+  }
   return box
+}
+
+function resolveCell(candidates: EdgeCandidate[]): number | null {
+  const importantValues = new Set(candidates.filter(candidate => candidate.important).map(candidate => candidate.px))
+  if (importantValues.size === 1) return [...importantValues][0]!
+  if (importantValues.size > 1) return null
+  const top = Math.max(...candidates.map(candidate => candidate.specificity))
+  const values = new Set(candidates.filter(candidate => candidate.specificity === top).map(candidate => candidate.px))
+  return values.size === 1 ? [...values][0]! : null
 }
 
 function compareBranchBoxes(
@@ -244,18 +267,37 @@ function compareBranchBoxes(
 ): {detail: string; magnitudePx: number | null} | null {
   const shifts: string[] = []
   let magnitude = 0
+  const conflicts: string[] = []
   for (const edge of edgeNames) {
-    const inset = other.edges[edge] - base.edges[edge]
+    let inset = 0
+    let margin = 0
+    for (const group of ['border', 'padding', 'margin'] as const) {
+      const key = `${group}:${edge}`
+      const baseRaw = base.cells.get(key)
+      const otherRaw = other.cells.get(key)
+      const baseCell = baseRaw === undefined ? 0 : baseRaw
+      const otherCell = otherRaw === undefined ? 0 : otherRaw
+      if (baseCell == null || otherCell == null) {
+        // One side is an unresolved same-specificity conflict: no numeric claim, but the
+        // disagreement itself is visible.
+        const baseText = baseCell == null ? 'unresolved conflict' : `${trim(baseCell)}px`
+        const otherText = otherCell == null ? 'unresolved conflict' : `${trim(otherCell)}px`
+        if (baseText !== otherText) conflicts.push(`${group}(${edge}) '${baseText}' vs '${otherText}'`)
+        continue
+      }
+      if (group === 'margin') margin += otherCell - baseCell
+      else inset += otherCell - baseCell
+    }
     if (inset !== 0) {
       shifts.push(`${edge} inset ${signed(inset)}px`)
       magnitude = Math.max(magnitude, Math.abs(inset))
     }
-    const margin = other.margins[edge] - base.margins[edge]
     if (margin !== 0) {
       shifts.push(`${edge} margin ${signed(margin)}px`)
       magnitude = Math.max(magnitude, Math.abs(margin))
     }
   }
+  shifts.push(...conflicts)
   const categorical: string[] = []
   const families = new Set([...base.categorical.keys(), ...other.categorical.keys()])
   for (const family of [...families].sort()) {
@@ -271,7 +313,11 @@ function compareBranchBoxes(
   }
 }
 
-type EdgeSpread = {kind: 'inset' | 'margin'; edges: readonly (typeof edgeNames)[number][]; negative: boolean}
+type EdgeSpread = {
+  group: 'border' | 'padding' | 'margin'
+  edges: readonly (typeof edgeNames)[number][]
+  negative: boolean
+}
 
 function edgeSpread(family: string): EdgeSpread | null {
   const negative = family.startsWith('-')
@@ -288,9 +334,11 @@ function edgeSpread(family: string): EdgeSpread | null {
     ml: ['left'], mr: ['right'], mt: ['top'], mb: ['bottom'], ms: ['left'], me: ['right'],
   }
   const inset = insetMap[bare]
-if (inset != null) return {kind: 'inset', edges: inset, negative}
+  if (inset != null) {
+    return {group: bare.startsWith('border') ? 'border' : 'padding', edges: inset, negative}
+  }
   const margin = marginMap[bare]
-if (margin != null) return {kind: 'margin', edges: margin, negative}
+  if (margin != null) return {group: 'margin', edges: margin, negative}
   return null
 }
 
@@ -326,6 +374,7 @@ type TokenClassification = {
   family: string
   value: string
   variants: string[]
+  important: boolean
 }
 
 const displayUtilities = new Set(['block', 'inline', 'inline-block', 'inline-flex', 'inline-grid', 'flex', 'grid', 'hidden', 'contents', 'table'])
@@ -336,15 +385,23 @@ const spacingRoots = new Set(['p', 'px', 'py', 'pt', 'pr', 'pb', 'pl', 'ps', 'pe
 
 export function classifyToken(rawToken: string): TokenClassification {
   const segments = rawToken.split(':')
-  const utility = segments[segments.length - 1]!
+  let utility = segments[segments.length - 1]!
   const variants = segments.slice(0, -1)
+  let important = false
+  if (utility.endsWith('!')) {
+    important = true
+    utility = utility.slice(0, -1)
+  } else if (utility.startsWith('!')) {
+    important = true
+    utility = utility.slice(1)
+  }
   const negative = utility.startsWith('-')
   const bare = negative ? utility.slice(1) : utility
 
-  if (displayUtilities.has(bare)) return {kind: 'geometry', family: 'display', value: bare, variants}
-  if (positionUtilities.has(bare)) return {kind: 'geometry', family: 'position', value: bare, variants}
+  if (displayUtilities.has(bare)) return {kind: 'geometry', family: 'display', value: bare, variants, important}
+  if (positionUtilities.has(bare)) return {kind: 'geometry', family: 'position', value: bare, variants, important}
   if (bare === 'grow' || bare === 'shrink' || bare === 'flex-1' || bare === 'flex-auto' || bare === 'flex-none' || bare === 'flex-initial') {
-    return {kind: 'geometry', family: 'flex', value: bare, variants}
+    return {kind: 'geometry', family: 'flex', value: bare, variants, important}
   }
 
   const dash = bare.indexOf('-')
@@ -359,26 +416,26 @@ export function classifyToken(rawToken: string): TokenClassification {
     const edge = parts.length > 0 && /^(t|r|b|l|x|y|s|e)$/.test(parts[0]!) ? parts.shift()! : ''
     const remainder = parts.join('-')
     if (remainder === '' || /^\d+$/.test(remainder) || /^\[\d+(px|rem|em)\]$/.test(remainder)) {
-      return {kind: 'geometry', family: `border-width${edge === '' ? '' : `-${edge}`}`, value: remainder === '' ? '1' : remainder, variants}
+      return {kind: 'geometry', family: `border-width${edge === '' ? '' : `-${edge}`}`, value: remainder === '' ? '1' : remainder, variants, important}
     }
     if (/^(solid|dashed|dotted|double|none|hidden)$/.test(remainder)) {
-      return {kind: 'paint', family: 'border-style', value: remainder, variants}
+      return {kind: 'paint', family: 'border-style', value: remainder, variants, important}
     }
-    return {kind: 'paint', family: 'border-color', value: remainder, variants}
+    return {kind: 'paint', family: 'border-color', value: remainder, variants, important}
   }
   if (root === 'text') {
     if (fontSizeScale.has(value) || /^\[\d+(px|rem|em)\]$/.test(value)) {
-      return {kind: 'geometry', family: 'font-size', value, variants}
+      return {kind: 'geometry', family: 'font-size', value, variants, important}
     }
-    return {kind: 'paint', family: 'text-color', value, variants}
+    return {kind: 'paint', family: 'text-color', value, variants, important}
   }
   if (spacingRoots.has(root) || spacingRoots.has(`${root}-${value.split('-')[0] ?? ''}`)) {
     const composite = spacingRoots.has(`${root}-${value.split('-')[0] ?? ''}`) ? `${root}-${value.split('-')[0]}` : root
     const amount = composite === root ? value : value.split('-').slice(1).join('-')
-    return {kind: 'geometry', family: `${negative ? '-' : ''}${composite}`, value: amount, variants}
+    return {kind: 'geometry', family: `${negative ? '-' : ''}${composite}`, value: amount, variants, important}
   }
-  if (paintRoots.has(root)) return {kind: 'paint', family: root, value, variants}
-  return {kind: 'unknown', family: root, value, variants}
+  if (paintRoots.has(root)) return {kind: 'paint', family: root, value, variants, important}
+  return {kind: 'unknown', family: root, value, variants, important}
 }
 
 export function formatStateGeometryReport(audits: StateGeometryFileAudit[]): string {

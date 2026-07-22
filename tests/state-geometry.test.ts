@@ -55,6 +55,27 @@ describe('state-variant geometry scan', () => {
     expect(dynamic.coverage).toEqual([{file: 'State.tsx', line: 3, reason: 'dynamicClassPart'}])
   })
 
+  test('same-family tokens override by specificity and importance instead of summing', () => {
+    // `border border-b-0`: the single-edge utility wins its edge, so only the bottom differs.
+    const reset = audit(`<div className={active ? 'border border-b-0' : 'border'} />`)
+    expect(reset.findings).toHaveLength(1)
+    expect(reset.findings[0]!.detail).toContain('bottom inset +1px')
+    expect(reset.findings[0]!.detail).not.toContain('left inset')
+
+    // The important marker beats a plain base token regardless of order.
+    const important = audit(`<div className={active ? 'border-l-0! border-l' : 'border-l'} />`)
+    expect(important.findings).toHaveLength(1)
+    expect(important.findings[0]!.detail).toContain('left inset +1px')
+
+    // Equal targeting with distinct values depends on stylesheet order: honestly unresolved,
+    // and identical unresolved conflicts on both sides stay clean.
+    const conflict = audit(`<div className={active ? 'pl-2 pl-4' : 'pl-6'} />`)
+    expect(conflict.findings).toHaveLength(1)
+    expect(conflict.findings[0]!.detail).toBe("state shifts layout: padding(left) 'unresolved conflict' vs '24px'")
+    const sharedConflict = audit("<div className={`pl-2 pl-4 ${active ? 'text-white' : 'text-black'}`} />")
+    expect(sharedConflict.findings).toEqual([])
+  })
+
   test('classifies border tokens by whether the value is a length', () => {
     expect(classifyToken('border')).toMatchObject({kind: 'geometry', family: 'border-width', value: '1'})
     expect(classifyToken('border-t-2')).toMatchObject({kind: 'geometry', family: 'border-width-t', value: '2'})
