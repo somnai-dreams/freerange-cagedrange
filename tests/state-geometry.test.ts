@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'bun:test'
-import {auditStateGeometrySource, classifyToken, collectBreakpoints, formatBreakpointReport} from '../src/spacing/state-geometry.ts'
+import {auditStateGeometrySource, classifyToken, collectBreakpoints, formatBreakpointReport, type BreakpointUsage} from '../src/spacing/state-geometry.ts'
 import * as ts from 'typescript'
 
 const audit = (jsx: string) => auditStateGeometrySource('State.tsx', `
@@ -186,7 +186,7 @@ export function Page() {
   return <div className="p-2 md:p-4 max-lg:hidden min-[900px]:flex sm:max-md:block" />
 }
 `, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-    const usage = new Map()
+    const usage = new Map<number, BreakpointUsage>()
     collectBreakpoints(sourceFile, usage)
     expect([...usage.keys()].sort((a, b) => a - b)).toEqual([640, 768, 900, 1024])
     const report = formatBreakpointReport(usage)
