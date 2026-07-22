@@ -5,7 +5,7 @@
 // version narrowed to that file: same configuration, same content kinds, same line
 // formats, one file's slice.
 
-import {existsSync} from 'node:fs'
+import {existsSync, readFileSync} from 'node:fs'
 import {relative, resolve} from 'node:path'
 import * as ts from 'typescript'
 import {analyzeCheckedSource, type DetailedAnalysis} from './analyze.ts'
@@ -15,6 +15,7 @@ import type {SiteID} from './ir/ids.ts'
 import {reportPath, siteLocation} from './ir/program.ts'
 import {formatUnsupportedReason} from './report/index.ts'
 import {auditSpacingFile, auditSpacingSource} from './spacing/audit.ts'
+import {auditStateGeometryFile, auditStateGeometrySource, formatStateGeometryReport} from './spacing/state-geometry.ts'
 import type {SpacingFileAudit, SpacingReportOptions} from './spacing/model.ts'
 import {formatSpacingReport} from './spacing/report.ts'
 import {checkFile} from './typescript/check.ts'
@@ -125,6 +126,34 @@ export function runProjectSpacing(searchFrom: string): boolean {
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   const audits = graph.sources.map(source => auditProjectSpacingSource(source.sourceFile))
   console.log(formatSpacingReport(audits, spacingReportOptions(graph.entry.parsed.options['pretty'])))
+  return false
+}
+
+export function runProjectStateGeometry(searchFrom: string): boolean {
+  const configPath = findTypeScriptConfig(searchFrom)
+  if (configPath == null) {
+    throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
+  }
+  const graph = loadSyntaxTypeScriptProjectGraph(configPath)
+  const audits = graph.sources.map(source => auditStateGeometryFile(source.sourceFile))
+  console.log(formatStateGeometryReport(audits))
+  return false
+}
+
+export function runFileStateGeometry(file: string): boolean {
+  const absoluteFile = resolve(file)
+  if (!existsSync(absoluteFile)) throw new Error(`File not found: ${absoluteFile}`)
+  const configPath = findTypeScriptConfig(process.cwd())
+  if (configPath == null) {
+    console.log(formatStateGeometryReport([auditStateGeometrySource(absoluteFile, readFileSync(absoluteFile, 'utf8'))]))
+    return false
+  }
+  const graph = loadSyntaxTypeScriptProjectGraph(configPath)
+  const source = findProjectSource(graph, absoluteFile)
+  if (source == null) {
+    throw new Error(`File is not part of the project resolved from ${configPath}: ${absoluteFile}`)
+  }
+  console.log(formatStateGeometryReport([auditStateGeometryFile(source.sourceFile)]))
   return false
 }
 

@@ -1,11 +1,12 @@
-// Four commands. `fr` checks the project for warnings and errors; `fr --audit` prints
+// Five commands. `fr` checks the project for warnings and errors; `fr --audit` prints
 // every function's contracts and refactoring suggestions; `fr --spacing` scans JSX for
-// spacing-ownership findings; `fr --layout` checks source-linked intrinsic block-size
-// contracts. The first three take an optional file that narrows the output to that file.
+// spacing-ownership findings; `fr --state-geometry` scans conditional classNames for
+// geometry that varies with state; `fr --layout` checks source-linked intrinsic block-size
+// contracts. The first four take an optional file that narrows the output to that file.
 // Layout takes an optional config path and is a CI gate. Audit mode is informational and
-// fails only on TypeScript errors. Spacing mode reads syntax only, so it never type-checks
-// and never fails.
-import {runFileAudit, runFileFindings, runFileSpacing, runProjectAudit, runProjectFindings, runProjectSpacing} from './src/project.ts'
+// fails only on TypeScript errors. Spacing and state-geometry modes read syntax only, so
+// they never type-check and never fail.
+import {runFileAudit, runFileFindings, runFileSpacing, runFileStateGeometry, runProjectAudit, runProjectFindings, runProjectSpacing, runProjectStateGeometry} from './src/project.ts'
 import {runProjectLayout} from './src/layout/project.ts'
 import {formatTypeScriptDiagnostics, TypeScriptDiagnosticsError} from './src/typescript/diagnostics.ts'
 
@@ -22,6 +23,11 @@ try {
     failed = arguments_.length === 1
       ? runProjectSpacing(process.cwd())
       : runFileSpacing(arguments_[1]!)
+  } else if (arguments_[0] === '--state-geometry') {
+    if (arguments_.length > 2) throw new Error('Usage: fr --state-geometry [file]')
+    failed = arguments_.length === 1
+      ? runProjectStateGeometry(process.cwd())
+      : runFileStateGeometry(arguments_[1]!)
   } else if (arguments_[0] === '--layout') {
     if (arguments_.length > 2) throw new Error('Usage: fr --layout [config]')
     failed = runProjectLayout(process.cwd(), arguments_[1])
