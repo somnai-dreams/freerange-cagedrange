@@ -39,6 +39,38 @@ describe('state-variant geometry scan', () => {
     expect(painted.findings).toEqual([])
   })
 
+  test('transform-only differences are motion, not shift; mixing in a box property restores shift', () => {
+    // The slide-reveal idiom: hover moves pixels on screen but reflows nothing.
+    const revealed = audit(`<button className="translate-x-14 group-hover:translate-x-0" />`)
+    expect(revealed.findings).toHaveLength(1)
+    expect(revealed.findings[0]).toMatchObject({kind: 'variantGeometry', severity: 'motion'})
+
+    // Negative spelling, no base at all: still an added transform, still paint-only.
+    const nudgedIn = audit(`<button className="group-hover:-translate-x-14" />`)
+    expect(nudgedIn.findings).toHaveLength(1)
+    expect(nudgedIn.findings[0]).toMatchObject({kind: 'variantGeometry', severity: 'motion'})
+
+    // Hook-rooted, still transform-only: live motion, but neighbors never move.
+    const nudged = auditStateGeometrySource('State.tsx', `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'translate-x-4' : 'translate-x-0'} />
+}
+`)
+    expect(nudged.findings).toHaveLength(1)
+    expect(nudged.findings[0]).toMatchObject({kind: 'branchGeometry', severity: 'motion'})
+
+    // A padding change rides along: the difference reflows, so the transform does not soften it.
+    const displaced = auditStateGeometrySource('State.tsx', `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'translate-x-4 pl-2' : 'translate-x-0'} />
+}
+`)
+    expect(displaced.findings.length).toBeGreaterThan(0)
+    for (const finding of displaced.findings) expect(finding.severity).toBe('shift')
+  })
+
   test('conditional spacing, font size, and display changes are findings; color and rounding are not', () => {
     expect(audit(`<div className={active ? 'pl-2' : 'pl-4'} />`).findings).toHaveLength(1)
     expect(audit(`<div className={active ? 'text-sm' : 'text-lg'} />`).findings).toHaveLength(1)

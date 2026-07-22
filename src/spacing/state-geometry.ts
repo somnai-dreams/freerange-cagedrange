@@ -20,10 +20,13 @@ export type StateGeometryFinding = {
   magnitudePx: number | null
   // Two-axis severity. 'shift': the discriminant can change while the element is mounted (state or
   // pseudo-state), so the geometry difference is visible motion — or a call site overrides the
-  // component template's own geometry. 'config': provably immobile — every call site fixes the
-  // discriminant with a literal, or the instance difference lies in caller-owned families the
-  // template never declared. 'unclear': the bounded analysis cannot decide.
-  severity: 'shift' | 'unclear' | 'config'
+  // component template's own geometry. 'motion': the discriminant is (or may be) live, but every
+  // differing family is a transform — translate, scale, rotate move pixels on screen without
+  // reflowing neighbors, so nothing is displaced; slide-reveals and hover nudges land here.
+  // 'config': provably immobile — every call site fixes the discriminant with a literal, or the
+  // instance difference lies in caller-owned families the template never declared. 'unclear': the
+  // bounded analysis cannot decide.
+  severity: 'shift' | 'motion' | 'unclear' | 'config'
   evidence: string
 }
 
@@ -518,7 +521,11 @@ function auditClassAttribute(
         file: audit.file,
         line,
         kind: 'branchGeometry',
-        severity: mobility === 'mobile' ? 'shift' : mobility === 'immobile' ? 'config' : 'unclear',
+        // A transform-only difference is bounded to paint motion whatever the discriminant turns
+        // out to be, so it outranks nothing but config even when mobility is unresolved.
+        severity: transformOnlyFamilies(difference.keys)
+          ? mobility === 'immobile' ? 'config' : 'motion'
+          : mobility === 'mobile' ? 'shift' : mobility === 'immobile' ? 'config' : 'unclear',
         evidence,
         magnitudePx: difference.magnitudePx,
         detail: difference.label == null
@@ -554,7 +561,7 @@ function auditClassAttribute(
         file: audit.file,
         line,
         kind: 'variantGeometry',
-        severity: 'shift',
+        severity: transformOnlyFamilies([parsed.family]) ? 'motion' : 'shift',
         evidence: 'pseudo-state variants transition on mounted elements',
         magnitudePx,
         detail: base == null
@@ -563,6 +570,20 @@ function auditClassAttribute(
       })
     }
   }
+}
+
+// Transform families move pixels on screen without entering layout: neighbors never reflow, so a
+// difference confined to them is motion, not displacement. Negative-value spellings keep the
+// leading dash in the family name.
+const transformFamilyPattern = /^-?(translate(-[xyz])?|scale(-[xy])?|rotate(-[xyz])?|skew(-[xy])?)$/
+
+function transformOnlyFamilies(families: Iterable<string>): boolean {
+  let any = false
+  for (const family of families) {
+    any = true
+    if (!transformFamilyPattern.test(family)) return false
+  }
+  return any
 }
 
 type BranchExtraction = {branches: string[][]; complete: boolean; overflow: boolean}
@@ -999,9 +1020,10 @@ export function formatStateGeometryReport(
   instanceFindings: StateGeometryFinding[] = [],
 ): string {
   const all = [...audits.flatMap(audit => audit.findings), ...instanceFindings]
-  // Live shifts first, then unresolved, then configuration; largest movement on top within a tier.
+  // Live shifts first, then unresolved, then paint-only motion, then configuration; largest
+  // movement on top within a tier.
   const rank = (finding: StateGeometryFinding): number =>
-    finding.severity === 'shift' ? 2 : finding.severity === 'unclear' ? 1 : 0
+    finding.severity === 'shift' ? 3 : finding.severity === 'unclear' ? 2 : finding.severity === 'motion' ? 1 : 0
   all.sort((left, right) => rank(right) - rank(left) || (right.magnitudePx ?? -1) - (left.magnitudePx ?? -1))
   const kindText = (finding: StateGeometryFinding): string =>
     finding.kind === 'branchGeometry'
@@ -1016,7 +1038,7 @@ export function formatStateGeometryReport(
     all.filter(finding => finding.severity === severity).length
   lines.push(
     `state geometry: ${all.length} finding${all.length === 1 ? '' : 's'} `
-    + `(${tally('shift')} shift, ${tally('unclear')} unclear, ${tally('config')} config); `
+    + `(${tally('shift')} shift, ${tally('motion')} motion, ${tally('unclear')} unclear, ${tally('config')} config); `
     + `${coverage} expression${coverage === 1 ? '' : 's'} partly dynamic`)
   return lines.join('\n')
 }
