@@ -18,6 +18,13 @@ export type StateGeometryFinding = {
   // Largest per-edge pixel delta when the difference is quantifiable, null for categorical
   // changes (display, position, symbolic sizes). Reports rank by magnitude.
   magnitudePx: number | null
+  // Two-axis severity. 'shift': the discriminant can change while the element is mounted (state or
+  // pseudo-state), so the geometry difference is visible motion — or a call site overrides the
+  // component template's own geometry. 'config': provably immobile — every call site fixes the
+  // discriminant with a literal, or the instance difference lies in caller-owned families the
+  // template never declared. 'unclear': the bounded analysis cannot decide.
+  severity: 'shift' | 'unclear' | 'config'
+  evidence: string
 }
 
 export type StateGeometryCoverage = {
@@ -40,6 +47,9 @@ export type ComponentTemplate = {
   file: string
   branches: string[][]
   complete: boolean
+  // Geometry the component's own tokens declare (cells and categorical families). A call site
+  // overriding these contradicts the component; differences outside them are caller-owned sizing.
+  ownGeometry: Set<string>
 }
 
 export type ComponentRegistry = Map<string, ComponentTemplate | 'ambiguous'>
@@ -52,6 +62,179 @@ export type ComponentInstance = {
 }
 
 const holeToken = '\u0000className'
+
+// Which props of which components are only ever fed literals: `orientation="vertical"` at every
+// call site means no mounted element can transition between the branches that prop selects.
+export type PropLiteralIndex = Map<string, Map<string, 'literalOnly' | 'nonLiteral'>>
+
+export function collectPropLiterals(sourceFile: ts.SourceFile, index: PropLiteralIndex): void {
+  const visit = (node: ts.Node): void => {
+    if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && ts.isIdentifier(node.tagName)
+      && /^[A-Z]/.test(node.tagName.text)) {
+      let props = index.get(node.tagName.text)
+      if (props == null) {
+        props = new Map()
+        index.set(node.tagName.text, props)
+      }
+      for (const property of node.attributes.properties) {
+        if (ts.isJsxAttribute(property) && ts.isIdentifier(property.name)) {
+          const literal = jsxAttributeIsLiteral(property)
+          const previous = props.get(property.name.text)
+          props.set(property.name.text, literal && previous !== 'nonLiteral' ? 'literalOnly' : 'nonLiteral')
+        } else {
+          // A spread can feed any prop anything.
+          for (const key of props.keys()) props.set(key, 'nonLiteral')
+          props.set('\u0000spread', 'nonLiteral')
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+}
+
+function jsxAttributeIsLiteral(attribute: ts.JsxAttribute): boolean {
+  const initializer = attribute.initializer
+  if (initializer == null) return true
+  if (ts.isStringLiteral(initializer)) return true
+  if (!ts.isJsxExpression(initializer) || initializer.expression == null) return false
+  const expression = initializer.expression
+  return ts.isStringLiteralLike(expression) || ts.isNumericLiteral(expression)
+    || expression.kind === ts.SyntaxKind.TrueKeyword || expression.kind === ts.SyntaxKind.FalseKeyword
+    || expression.kind === ts.SyntaxKind.NullKeyword
+}
+
+type Mobility = 'mobile' | 'unknown' | 'immobile'
+
+// Classify whether the discriminants gating a conditional className can change while the element
+// is mounted. Hook-produced values are mobile; props that every call site fixes with a literal are
+// immobile; everything the bounded analysis cannot resolve stays unknown.
+function classifyDiscriminants(
+  conditions: ts.Expression[],
+  attribute: ts.JsxAttribute,
+  sourceFile: ts.SourceFile,
+  propIndex: PropLiteralIndex | undefined,
+): {mobility: Mobility; evidence: string} {
+  if (conditions.length === 0) return {mobility: 'immobile', evidence: 'no conditions'}
+  let sawUnknown = false
+  let mobileEvidence: string | null = null
+  let immobileEvidence: string | null = null
+  const enclosing = enclosingComponent(attribute)
+  const bindings = localBindingIndex(sourceFile)
+  for (const condition of conditions) {
+    for (const name of discriminantRoots(condition)) {
+      if (name == null) {
+        sawUnknown = true
+        continue
+      }
+      const binding = bindings.get(name)
+      if (binding === 'hook') {
+        mobileEvidence = `'${name}' comes from a hook`
+        continue
+      }
+      if (binding === 'literal') {
+        immobileEvidence = `'${name}' is a local literal`
+        continue
+      }
+      if (enclosing != null && enclosing.props.has(name)) {
+        const usage = propIndex?.get(enclosing.name)?.get(name)
+        const spread = propIndex?.get(enclosing.name)?.has('\u0000spread') ?? false
+        if (usage === 'literalOnly' && !spread) {
+          immobileEvidence = `every call site fixes '${name}' with a literal`
+          continue
+        }
+        sawUnknown = true
+        continue
+      }
+      sawUnknown = true
+    }
+  }
+  if (mobileEvidence != null) return {mobility: 'mobile', evidence: mobileEvidence}
+  if (sawUnknown) return {mobility: 'unknown', evidence: 'the discriminant could not be resolved'}
+  return {mobility: 'immobile', evidence: immobileEvidence ?? 'the discriminants never change while mounted'}
+}
+
+// Identifier roots of a condition; null marks something the analysis will not follow (calls,
+// element access, this).
+function discriminantRoots(expression: ts.Expression): Array<string | null> {
+  if (ts.isParenthesizedExpression(expression)) return discriminantRoots(expression.expression)
+  if (ts.isPrefixUnaryExpression(expression) && expression.operator === ts.SyntaxKind.ExclamationToken) {
+    return discriminantRoots(expression.operand)
+  }
+  if (ts.isBinaryExpression(expression)) {
+    return [...discriminantRoots(expression.left), ...discriminantRoots(expression.right)]
+  }
+  if (ts.isPropertyAccessExpression(expression)) return discriminantRoots(expression.expression)
+  if (ts.isIdentifier(expression)) return [expression.text]
+  if (ts.isStringLiteralLike(expression) || ts.isNumericLiteral(expression)
+    || expression.kind === ts.SyntaxKind.TrueKeyword || expression.kind === ts.SyntaxKind.FalseKeyword
+    || expression.kind === ts.SyntaxKind.NullKeyword) {
+    return []
+  }
+  return [null]
+}
+
+function enclosingComponent(node: ts.Node): {name: string; props: Set<string>} | null {
+  let current: ts.Node | undefined = node
+  while (current != null) {
+    let name: string | null = null
+    let fn: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | null = null
+    if (ts.isFunctionDeclaration(current) && current.name != null) {
+      name = current.name.text
+      fn = current
+    } else if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+      // .parent is typed non-nullable but is undefined on unbound trees.
+      const parent = current.parent as ts.Node | undefined
+      if (parent != null && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+        name = parent.name.text
+        fn = current
+      }
+    }
+    if (name != null && fn != null && /^[A-Z]/.test(name)) {
+      const props = new Set<string>()
+      const parameter = fn.parameters[0]
+      if (parameter != null && ts.isObjectBindingPattern(parameter.name)) {
+        for (const element of parameter.name.elements) {
+          if (ts.isIdentifier(element.name)) props.add(element.name.text)
+        }
+      }
+      return {name, props}
+    }
+    current = current.parent as ts.Node | undefined
+  }
+  return null
+}
+
+const bindingIndexCache = new WeakMap<ts.SourceFile, Map<string, 'hook' | 'literal' | 'other'>>()
+
+function localBindingIndex(sourceFile: ts.SourceFile): Map<string, 'hook' | 'literal' | 'other'> {
+  const cached = bindingIndexCache.get(sourceFile)
+  if (cached != null) return cached
+  const index = new Map<string, 'hook' | 'literal' | 'other'>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && node.initializer != null) {
+      const fromHook = ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression)
+        && /^use[A-Z]/.test(node.initializer.expression.text)
+      const fromLiteral = ts.isStringLiteralLike(node.initializer) || ts.isNumericLiteral(node.initializer)
+        || node.initializer.kind === ts.SyntaxKind.TrueKeyword || node.initializer.kind === ts.SyntaxKind.FalseKeyword
+      const kind = fromHook ? 'hook' : fromLiteral ? 'literal' : 'other'
+      const record = (binding: ts.BindingName): void => {
+        if (ts.isIdentifier(binding)) {
+          index.set(binding.text, kind)
+        } else {
+          for (const element of binding.elements) {
+            if (ts.isBindingElement(element) && ts.isIdentifier(element.name)) index.set(element.name.text, kind)
+          }
+        }
+      }
+      record(node.name)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  bindingIndexCache.set(sourceFile, index)
+  return index
+}
 
 export function collectComponentTemplates(sourceFile: ts.SourceFile, registry: ComponentRegistry): void {
   const register = (name: string, body: ts.Node): void => {
@@ -73,10 +256,14 @@ export function collectComponentTemplates(sourceFile: ts.SourceFile, registry: C
     if (initializer == null || !ts.isJsxExpression(initializer) || initializer.expression == null) return
     const extraction = extractBranches(initializer.expression, 'className')
     if (!extraction.branches.some(branch => branch.includes(holeToken))) return
+    const ownBranch = (extraction.branches.find(branch => branch.includes(holeToken)) ?? [])
+      .filter(token => token !== holeToken)
+    const ownBox = evaluateBranchBox(ownBranch)
     const template: ComponentTemplate = {
       file: sourceFile.fileName,
       branches: extraction.branches,
       complete: extraction.complete,
+      ownGeometry: new Set([...ownBox.cells.keys(), ...ownBox.categorical.keys()]),
     }
     registry.set(name, registry.has(name) ? 'ambiguous' : template)
   }
@@ -103,7 +290,10 @@ function expressionMentionsIdentifier(expression: ts.Node, name: string): boolea
 
 // Cross-instance comparison over the collected call sites: every instance compares against the
 // first, so one divergent call site is one finding.
-export function compareComponentInstances(instances: ComponentInstance[]): StateGeometryFinding[] {
+export function compareComponentInstances(
+  instances: ComponentInstance[],
+  registry?: ComponentRegistry,
+): StateGeometryFinding[] {
   const byComponent = new Map<string, ComponentInstance[]>()
   for (const instance of instances) {
     const list = byComponent.get(instance.component)
@@ -112,13 +302,20 @@ export function compareComponentInstances(instances: ComponentInstance[]): State
   }
   const findings: StateGeometryFinding[] = []
   for (const [component, list] of byComponent) {
+    const template = registry?.get(component)
+    const ownGeometry = template != null && template !== 'ambiguous' ? template.ownGeometry : new Set<string>()
     for (let index = 1; index < list.length; index++) {
       const difference = compareBranchBoxes(list[0]!.box, list[index]!.box)
       if (difference == null) continue
+      const overridesTemplate = difference.keys.some(key => ownGeometry.has(key))
       findings.push({
         file: list[index]!.file,
         line: list[index]!.line,
         kind: 'instanceGeometry',
+        severity: overridesTemplate ? 'shift' : 'config',
+        evidence: overridesTemplate
+          ? "a call site overrides geometry the component itself declares"
+          : 'the difference is caller-owned sizing the template never declares',
         magnitudePx: difference.magnitudePx,
         detail: `<${component}> instances disagree (vs ${list[0]!.file}:${list[0]!.line}): `
           + difference.detail.replace('state shifts layout: ', ''),
@@ -136,17 +333,23 @@ export function auditStateGeometrySource(file: string, source: string): StateGeo
   const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   const registry: ComponentRegistry = new Map()
   collectComponentTemplates(sourceFile, registry)
-  const audit = auditStateGeometryFile(sourceFile, registry)
-  audit.findings.push(...compareComponentInstances(audit.instances))
+  const propIndex: PropLiteralIndex = new Map()
+  collectPropLiterals(sourceFile, propIndex)
+  const audit = auditStateGeometryFile(sourceFile, registry, propIndex)
+  audit.findings.push(...compareComponentInstances(audit.instances, registry))
   return audit
 }
 
-export function auditStateGeometryFile(sourceFile: ts.SourceFile, registry?: ComponentRegistry): StateGeometryFileAudit {
+export function auditStateGeometryFile(
+  sourceFile: ts.SourceFile,
+  registry?: ComponentRegistry,
+  propIndex?: PropLiteralIndex,
+): StateGeometryFileAudit {
   const audit: StateGeometryFileAudit = {file: sourceFile.fileName, findings: [], coverage: [], instances: []}
   const visit = (node: ts.Node): void => {
     if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name)
       && (node.name.text === 'className' || node.name.text === 'class')) {
-      auditClassAttribute(node, sourceFile, audit)
+      auditClassAttribute(node, sourceFile, audit, propIndex)
     }
     if (registry != null && (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
       && ts.isIdentifier(node.tagName)) {
@@ -199,6 +402,7 @@ function auditClassAttribute(
   attribute: ts.JsxAttribute,
   sourceFile: ts.SourceFile,
   audit: StateGeometryFileAudit,
+  propIndex?: PropLiteralIndex,
 ): void {
   const initializer = attribute.initializer
   if (initializer == null) return
@@ -209,7 +413,8 @@ function auditClassAttribute(
       ? initializer.expression
       : null
   if (expression == null) return
-  const extraction = extractBranches(expression)
+  const conditions: ts.Expression[] = []
+  const extraction = extractBranches(expression, undefined, conditions)
   if (!extraction.complete) {
     audit.coverage.push({file: audit.file, line, reason: extraction.overflow ? 'branchFanOut' : 'dynamicClassPart'})
   }
@@ -223,7 +428,15 @@ function auditClassAttribute(
   for (let index = 1; index < boxes.length; index++) {
     const difference = compareBranchBoxes(boxes[0]!, boxes[index]!)
     if (difference != null) {
-      audit.findings.push({file: audit.file, line, kind: 'branchGeometry', ...difference})
+      const {mobility, evidence} = classifyDiscriminants(conditions, attribute, sourceFile, propIndex)
+      audit.findings.push({
+        file: audit.file,
+        line,
+        kind: 'branchGeometry',
+        severity: mobility === 'mobile' ? 'shift' : mobility === 'immobile' ? 'config' : 'unclear',
+        evidence,
+        ...difference,
+      })
       break
     }
   }
@@ -253,6 +466,8 @@ function auditClassAttribute(
         file: audit.file,
         line,
         kind: 'variantGeometry',
+        severity: 'shift',
+        evidence: 'pseudo-state variants transition on mounted elements',
         magnitudePx,
         detail: base == null
           ? `'${token}' adds ${parsed.family}${variantPx == null ? '' : ` (+${trim(variantPx)}px)`} on a state with no base reservation`
@@ -264,44 +479,61 @@ function auditClassAttribute(
 
 type BranchExtraction = {branches: string[][]; complete: boolean; overflow: boolean}
 
-function extractBranches(expression: ts.Expression, holeName?: string): BranchExtraction {
+function extractBranches(
+  expression: ts.Expression,
+  holeName?: string,
+  conditions?: ts.Expression[],
+): BranchExtraction {
   if (holeName != null && ts.isIdentifier(expression) && expression.text === holeName) {
     return {branches: [[holeToken]], complete: true, overflow: false}
   }
-  if (ts.isParenthesizedExpression(expression)) return extractBranches(expression.expression, holeName)
+  if (ts.isParenthesizedExpression(expression)) return extractBranches(expression.expression, holeName, conditions)
   if (ts.isStringLiteralLike(expression)) return single(expression.text)
   if (ts.isConditionalExpression(expression)) {
-    return unionOf([extractBranches(expression.whenTrue, holeName), extractBranches(expression.whenFalse, holeName)])
+    conditions?.push(expression.condition)
+    return unionOf([
+      extractBranches(expression.whenTrue, holeName, conditions),
+      extractBranches(expression.whenFalse, holeName, conditions),
+    ])
   }
   if (ts.isBinaryExpression(expression)) {
     const operator = expression.operatorToken.kind
     if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
-      return unionOf([extractBranches(expression.right, holeName), single('')])
+      conditions?.push(expression.left)
+      return unionOf([extractBranches(expression.right, holeName, conditions), single('')])
     }
     if (operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken) {
-      return unionOf([extractBranches(expression.left, holeName), extractBranches(expression.right, holeName)])
+      conditions?.push(expression.left)
+      return unionOf([
+        extractBranches(expression.left, holeName, conditions),
+        extractBranches(expression.right, holeName, conditions),
+      ])
     }
     if (operator === ts.SyntaxKind.PlusToken) {
-      return crossProduct([extractBranches(expression.left, holeName), extractBranches(expression.right, holeName)])
+      return crossProduct([
+        extractBranches(expression.left, holeName, conditions),
+        extractBranches(expression.right, holeName, conditions),
+      ])
     }
     return dynamic()
   }
   if (ts.isTemplateExpression(expression)) {
     const parts: BranchExtraction[] = [single(expression.head.text)]
     for (const span of expression.templateSpans) {
-      parts.push(extractBranches(span.expression, holeName))
+      parts.push(extractBranches(span.expression, holeName, conditions))
       parts.push(single(span.literal.text))
     }
     return crossProduct(parts)
   }
   if (ts.isCallExpression(expression) && ts.isIdentifier(expression.expression)
     && classCombinerNames.has(expression.expression.text.toLowerCase())) {
-    return crossProduct(expression.arguments.map(argument => extractBranches(argument, holeName)))
+    return crossProduct(expression.arguments.map(argument => extractBranches(argument, holeName, conditions)))
   }
   if (ts.isObjectLiteralExpression(expression)) {
     const parts: BranchExtraction[] = []
     for (const property of expression.properties) {
       if (ts.isPropertyAssignment(property) && (ts.isStringLiteral(property.name) || ts.isIdentifier(property.name))) {
+        conditions?.push(property.initializer)
         parts.push(unionOf([single(property.name.text), single('')]))
       } else {
         parts.push(dynamic())
@@ -410,10 +642,11 @@ function resolveCell(candidates: EdgeCandidate[]): number | null {
 function compareBranchBoxes(
   base: BranchBox,
   other: BranchBox,
-): {detail: string; magnitudePx: number | null} | null {
+): {detail: string; magnitudePx: number | null; keys: string[]} | null {
   const shifts: string[] = []
   let magnitude = 0
   const conflicts: string[] = []
+  const keys: string[] = []
   for (const edge of edgeNames) {
     let inset = 0
     let margin = 0
@@ -428,9 +661,13 @@ function compareBranchBoxes(
         // disagreement itself is visible.
         const baseText = baseCell == null ? 'unresolved conflict' : `${trim(baseCell)}px`
         const otherText = otherCell == null ? 'unresolved conflict' : `${trim(otherCell)}px`
-        if (baseText !== otherText) conflicts.push(`${group}(${edge}) '${baseText}' vs '${otherText}'`)
+        if (baseText !== otherText) {
+          conflicts.push(`${group}(${edge}) '${baseText}' vs '${otherText}'`)
+          keys.push(key)
+        }
         continue
       }
+      if (otherCell !== baseCell) keys.push(key)
       if (group === 'margin') margin += otherCell - baseCell
       else inset += otherCell - baseCell
     }
@@ -449,13 +686,17 @@ function compareBranchBoxes(
   for (const family of [...families].sort()) {
     const from = base.categorical.get(family)
     const to = other.categorical.get(family)
-    if (from !== to) categorical.push(`${family} '${from ?? 'none'}' vs '${to ?? 'none'}'`)
+    if (from !== to) {
+      categorical.push(`${family} '${from ?? 'none'}' vs '${to ?? 'none'}'`)
+      keys.push(family)
+    }
   }
   if (shifts.length === 0 && categorical.length === 0) return null
   const parts = [...shifts, ...categorical]
   return {
     detail: `state shifts layout: ${parts.join(', ')}`,
     magnitudePx: shifts.length > 0 ? magnitude : null,
+    keys,
   }
 }
 
@@ -590,16 +831,24 @@ export function formatStateGeometryReport(
   instanceFindings: StateGeometryFinding[] = [],
 ): string {
   const all = [...audits.flatMap(audit => audit.findings), ...instanceFindings]
-  // Quantified shifts first, largest movement on top; categorical changes after.
-  all.sort((left, right) => (right.magnitudePx ?? -1) - (left.magnitudePx ?? -1))
+  // Live shifts first, then unresolved, then configuration; largest movement on top within a tier.
+  const rank = (finding: StateGeometryFinding): number =>
+    finding.severity === 'shift' ? 2 : finding.severity === 'unclear' ? 1 : 0
+  all.sort((left, right) => rank(right) - rank(left) || (right.magnitudePx ?? -1) - (left.magnitudePx ?? -1))
   const kindText = (finding: StateGeometryFinding): string =>
     finding.kind === 'branchGeometry'
       ? 'state changes geometry'
       : finding.kind === 'variantGeometry'
         ? 'state variant changes geometry'
         : 'component instances disagree on geometry'
-  const lines = all.map(finding => `${finding.file}:${finding.line} ${kindText(finding)}: ${finding.detail}`)
+  const lines = all.map(finding =>
+    `[${finding.severity}] ${finding.file}:${finding.line} ${kindText(finding)}: ${finding.detail} (${finding.evidence})`)
   const coverage = audits.reduce((total, audit) => total + audit.coverage.length, 0)
-  lines.push(`state geometry: ${all.length} finding${all.length === 1 ? '' : 's'}; ${coverage} expression${coverage === 1 ? '' : 's'} partly dynamic`)
+  const tally = (severity: StateGeometryFinding['severity']): number =>
+    all.filter(finding => finding.severity === severity).length
+  lines.push(
+    `state geometry: ${all.length} finding${all.length === 1 ? '' : 's'} `
+    + `(${tally('shift')} shift, ${tally('unclear')} unclear, ${tally('config')} config); `
+    + `${coverage} expression${coverage === 1 ? '' : 's'} partly dynamic`)
   return lines.join('\n')
 }

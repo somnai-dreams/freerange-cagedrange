@@ -19,9 +19,11 @@ import {
   auditStateGeometryFile,
   auditStateGeometrySource,
   collectComponentTemplates,
+  collectPropLiterals,
   compareComponentInstances,
   formatStateGeometryReport,
   type ComponentRegistry,
+  type PropLiteralIndex,
 } from './spacing/state-geometry.ts'
 import type {SpacingFileAudit, SpacingReportOptions} from './spacing/model.ts'
 import {formatSpacingReport} from './spacing/report.ts'
@@ -145,9 +147,13 @@ export function runProjectStateGeometry(searchFrom: string): boolean {
   // Templates first so a call site anywhere in the project can compare against a component
   // defined in another file; duplicate component names become ambiguous and make no claim.
   const registry: ComponentRegistry = new Map()
-  for (const source of graph.sources) collectComponentTemplates(source.sourceFile, registry)
-  const audits = graph.sources.map(source => auditStateGeometryFile(source.sourceFile, registry))
-  const instanceFindings = compareComponentInstances(audits.flatMap(audit => audit.instances))
+  const propIndex: PropLiteralIndex = new Map()
+  for (const source of graph.sources) {
+    collectComponentTemplates(source.sourceFile, registry)
+    collectPropLiterals(source.sourceFile, propIndex)
+  }
+  const audits = graph.sources.map(source => auditStateGeometryFile(source.sourceFile, registry, propIndex))
+  const instanceFindings = compareComponentInstances(audits.flatMap(audit => audit.instances), registry)
   console.log(formatStateGeometryReport(audits, instanceFindings))
   return false
 }
@@ -166,9 +172,13 @@ export function runFileStateGeometry(file: string): boolean {
     throw new Error(`File is not part of the project resolved from ${configPath}: ${absoluteFile}`)
   }
   const registry: ComponentRegistry = new Map()
-  for (const projectSource of graph.sources) collectComponentTemplates(projectSource.sourceFile, registry)
-  const audit = auditStateGeometryFile(source.sourceFile, registry)
-  console.log(formatStateGeometryReport([audit], compareComponentInstances(audit.instances)))
+  const propIndex: PropLiteralIndex = new Map()
+  for (const projectSource of graph.sources) {
+    collectComponentTemplates(projectSource.sourceFile, registry)
+    collectPropLiterals(projectSource.sourceFile, propIndex)
+  }
+  const audit = auditStateGeometryFile(source.sourceFile, registry, propIndex)
+  console.log(formatStateGeometryReport([audit], compareComponentInstances(audit.instances, registry)))
   return false
 }
 

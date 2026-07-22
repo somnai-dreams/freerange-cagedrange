@@ -97,6 +97,8 @@ export function Page({transition}: {transition: string}) {
     expect(instance[0]!.detail).toContain('<Shell> instances disagree')
     expect(instance[0]!.detail).toContain('left inset +1px')
     expect(instance[0]!.magnitudePx).toBe(1)
+    // The call site overrides border-l, geometry the shell itself declares.
+    expect(instance[0]!.severity).toBe('shift')
 
     // Call sites differing only in paint make no instance claim.
     const painted = auditStateGeometrySource('Shell.tsx', `
@@ -111,6 +113,59 @@ export function Page() {
 }
 `)
     expect(painted.findings.filter(finding => finding.kind === 'instanceGeometry')).toEqual([])
+  })
+
+  test('severity follows whether the discriminant can change while mounted', () => {
+    // Hook-rooted condition: the element transitions live — a real shift.
+    const stateful = auditStateGeometrySource('S.tsx', `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'border p-2' : 'p-2'} />
+}
+`)
+    expect(stateful.findings[0]).toMatchObject({severity: 'shift'})
+    expect(stateful.findings[0]!.evidence).toContain("'open' comes from a hook")
+
+    // Orientation-style prop fixed by every call site: configurations, not motion.
+    const configured = auditStateGeometrySource('S.tsx', `
+export function Separator({orientation}: {orientation: 'horizontal' | 'vertical'}) {
+  return <div className={orientation === 'horizontal' ? 'h-px w-full' : 'h-full w-px'} />
+}
+export function Page() {
+  return <>
+    <Separator orientation="horizontal" />
+    <Separator orientation="vertical" />
+  </>
+}
+`)
+    expect(configured.findings[0]).toMatchObject({severity: 'config'})
+    expect(configured.findings[0]!.evidence).toContain("every call site fixes 'orientation' with a literal")
+
+    // A discriminant the bounded analysis cannot resolve stays honestly unclear.
+    const unresolved = auditStateGeometrySource('S.tsx', `
+export function Row({item}: {item: {expanded: boolean}}) {
+  return <div className={item.expanded ? 'p-4' : 'p-2'} />
+}
+`)
+    expect(unresolved.findings[0]).toMatchObject({severity: 'unclear'})
+  })
+
+  test('caller-owned sizing on a paint-only primitive is config, not a shift', () => {
+    const result = auditStateGeometrySource('Skeleton.tsx', `
+export function Skeleton({className}: {className: string}) {
+  return <div className={\`animate-pulse rounded-md bg-muted \${className}\`} />
+}
+export function Cards() {
+  return <>
+    <Skeleton className="h-5 w-2/5" />
+    <Skeleton className="h-4 w-4/5" />
+  </>
+}
+`)
+    const instance = result.findings.filter(finding => finding.kind === 'instanceGeometry')
+    expect(instance).toHaveLength(1)
+    expect(instance[0]!.severity).toBe('config')
+    expect(instance[0]!.evidence).toContain('caller-owned sizing')
   })
 
   test('classifies border tokens by whether the value is a length', () => {
