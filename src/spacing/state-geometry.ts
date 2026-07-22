@@ -205,6 +205,63 @@ function enclosingComponent(node: ts.Node): {name: string; props: Set<string>} |
   return null
 }
 
+// The viewports worth testing are declared by the source itself: every responsive variant names a
+// threshold. Default Tailwind screens plus arbitrary min-[Npx]/max-[Npx] variants; unparseable
+// media logic is not represented here, so the derived set is a lower bound.
+const tailwindScreens: Record<string, number> = {sm: 640, md: 768, lg: 1024, xl: 1280, '2xl': 1536}
+
+export type BreakpointUsage = {
+  thresholdPx: number
+  variants: Map<string, number>
+}
+
+export function collectBreakpoints(sourceFile: ts.SourceFile, usage: Map<number, BreakpointUsage>): void {
+  const record = (thresholdPx: number, variant: string): void => {
+    let entry = usage.get(thresholdPx)
+    if (entry == null) {
+      entry = {thresholdPx, variants: new Map()}
+      usage.set(thresholdPx, entry)
+    }
+    entry.variants.set(variant, (entry.variants.get(variant) ?? 0) + 1)
+  }
+  const visitToken = (token: string): void => {
+    for (const segment of token.split(':').slice(0, -1)) {
+      const bare = segment.startsWith('max-') ? segment.slice(4) : segment
+      const screen = tailwindScreens[bare]
+      if (screen != null) {
+        record(screen, segment)
+        continue
+      }
+      const arbitrary = /^(?:min|max)-\[(\d+(?:\.\d+)?)px\]$/.exec(segment)
+      if (arbitrary != null) record(Number(arbitrary[1]), segment)
+    }
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteralLike(node)) {
+      for (const token of node.text.split(/\s+/)) {
+        if (token.includes(':')) visitToken(token)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+}
+
+export function formatBreakpointReport(usage: Map<number, BreakpointUsage>): string {
+  const thresholds = [...usage.values()].sort((left, right) => left.thresholdPx - right.thresholdPx)
+  if (thresholds.length === 0) return 'breakpoints: none declared in class tokens'
+  const lines = thresholds.map(entry => {
+    const variants = [...entry.variants.entries()]
+      .sort((left, right) => right[1] - left[1])
+      .map(([variant, count]) => `${variant} ×${count}`)
+      .join(', ')
+    return `${entry.thresholdPx}px — ${variants}`
+  })
+  const seams = thresholds.flatMap(entry => [entry.thresholdPx - 1, entry.thresholdPx])
+  lines.push(`test seams: ${[...new Set(seams)].sort((a, b) => a - b).join(', ')}`)
+  return lines.join('\n')
+}
+
 const bindingIndexCache = new WeakMap<ts.SourceFile, Map<string, 'hook' | 'literal' | 'other'>>()
 
 function localBindingIndex(sourceFile: ts.SourceFile): Map<string, 'hook' | 'literal' | 'other'> {

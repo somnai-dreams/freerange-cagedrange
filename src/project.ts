@@ -18,10 +18,13 @@ import {auditSpacingFile, auditSpacingSource} from './spacing/audit.ts'
 import {
   auditStateGeometryFile,
   auditStateGeometrySource,
+  collectBreakpoints,
   collectComponentTemplates,
   collectPropLiterals,
   compareComponentInstances,
+  formatBreakpointReport,
   formatStateGeometryReport,
+  type BreakpointUsage,
   type ComponentRegistry,
   type PropLiteralIndex,
 } from './spacing/state-geometry.ts'
@@ -135,6 +138,18 @@ export function runProjectSpacing(searchFrom: string): boolean {
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   const audits = graph.sources.map(source => auditProjectSpacingSource(source.sourceFile))
   console.log(formatSpacingReport(audits, spacingReportOptions(graph.entry.parsed.options['pretty'])))
+  return false
+}
+
+export function runProjectBreakpoints(searchFrom: string): boolean {
+  const configPath = findTypeScriptConfig(searchFrom)
+  if (configPath == null) {
+    throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
+  }
+  const graph = loadSyntaxTypeScriptProjectGraph(configPath)
+  const usage = new Map<number, BreakpointUsage>()
+  for (const source of graph.sources) collectBreakpoints(source.sourceFile, usage)
+  console.log(formatBreakpointReport(usage))
   return false
 }
 
