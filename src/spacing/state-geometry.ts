@@ -13,16 +13,19 @@ export {classifyToken, pixelsOf} from '../tailwind/core.ts'
 export type StateGeometryFinding = {
   file: string
   line: number
-  kind: 'branchGeometry' | 'variantGeometry' | 'instanceGeometry' | 'styleGeometry'
+  kind: 'branchGeometry' | 'variantGeometry' | 'instanceGeometry' | 'styleGeometry' | 'childGeometry'
   // branchGeometry: two extracted branches evaluate to different local box geometry.
   // variantGeometry: a state-variant token adds or changes geometry with no matching base token.
   // instanceGeometry: two call sites of the same component evaluate to different effective boxes.
   // styleGeometry: branches of a conditional inside a style attribute disagree on a modeled
   // property — literal against literal quantifies, literal against a runtime value differs
   // unless proven equal, and identical source text on both sides IS proven equal.
+  // childGeometry: the branches of a conditional JSX child disagree on their root geometry —
+  // selecting the state swaps one box for another, or for nothing at all.
   detail: string
-  // Largest per-edge pixel delta when the difference is quantifiable, null for categorical
-  // changes (display, position, symbolic sizes). Reports rank by magnitude.
+  // Largest pixel delta when both sides of a difference resolve to pixels (per edge for
+  // border/padding/margin, per family for sizes the scale quantifies), null for changes the
+  // scale cannot quantify (display, position, symbolic sizes). Reports rank by magnitude.
   magnitudePx: number | null
   // Two-axis severity. 'shift': the discriminant can change while the element is mounted (state or
   // pseudo-state), so the geometry difference is visible motion — or a call site overrides the
@@ -48,7 +51,7 @@ export type StateGeometryFinding = {
 export type StateGeometryCoverage = {
   file: string
   line: number
-  reason: 'dynamicClassPart' | 'branchFanOut' | 'dynamicStylePart'
+  reason: 'dynamicClassPart' | 'branchFanOut' | 'dynamicStylePart' | 'dynamicChildBranch'
 }
 
 export type StateGeometryFileAudit = {
@@ -161,7 +164,7 @@ type Mobility = 'mobile' | 'unknown' | 'immobile'
 // immobile; everything the bounded analysis cannot resolve stays unknown.
 function classifyDiscriminants(
   conditions: ts.Expression[],
-  attribute: ts.JsxAttribute,
+  site: ts.Node,
   sourceFile: ts.SourceFile,
   propIndex: PropLiteralIndex | undefined,
 ): {mobility: Mobility; evidence: string} {
@@ -170,7 +173,7 @@ function classifyDiscriminants(
   let mobileEvidence: string | null = null
   let immobileEvidence: string | null = null
   const unresolvedNames: string[] = []
-  const enclosing = enclosingComponent(attribute)
+  const enclosing = enclosingComponent(site)
   const bindings = localBindingIndex(sourceFile)
   for (const condition of conditions) {
     for (const name of discriminantRoots(condition)) {
@@ -626,8 +629,23 @@ export function auditStateGeometryFile(
     if (ts.isJsxElement(node)) {
       const overlayForChildren = insideOverlay || (tailwind && elementAlwaysOutOfFlow(node.openingElement))
       visit(node.openingElement, insideOverlay)
-      for (const child of node.children) visit(child, overlayForChildren)
+      for (const child of node.children) {
+        if (ts.isJsxExpression(child)) {
+          auditConditionalChild(child, sourceFile, audit,
+            {propIndex, resolveName, insideOverlay: overlayForChildren, tailwind})
+        }
+        visit(child, overlayForChildren)
+      }
       visit(node.closingElement, insideOverlay)
+      return
+    }
+    if (ts.isJsxFragment(node)) {
+      for (const child of node.children) {
+        if (ts.isJsxExpression(child)) {
+          auditConditionalChild(child, sourceFile, audit, {propIndex, resolveName, insideOverlay, tailwind})
+        }
+        visit(child, insideOverlay)
+      }
       return
     }
     ts.forEachChild(node, child => { visit(child, insideOverlay) })
@@ -856,6 +874,199 @@ function literalPixels(value: StyleValue): number | null {
   if (value.kind !== 'literal') return null
   const match = value.text.match(/^(-?\d+(?:\.\d+)?)(px)?$/)
   return match == null ? null : Number(match[1])
+}
+
+// Element-level state swaps: a JSX child that is a conditional whose branches are elements.
+// `{isEditing ? <input className="h-7"/> : <span className="text-sm"/>}` swaps one root box for
+// another — the same claim a conditional className makes, one syntax level up. Each branch
+// contributes its ROOT's className tokens and modeled style literals; the roots' children are
+// out of scope (their own attributes are audited when the walk reaches them). A branch that is
+// neither an element nor provably empty — a fragment, a mapped list, a variable — is a
+// dynamicChildBranch coverage record, never a guess.
+type ChildArm =
+  | {kind: 'element'; opening: ts.JsxOpeningElement | ts.JsxSelfClosingElement}
+  | {kind: 'absent'}
+  | {kind: 'opaque'}
+
+function flattenChildArms(expression: ts.Expression, conditions: ts.Expression[], arms: ChildArm[]): void {
+  if (arms.length >= branchLimit) return
+  const unwrapped = ts.isParenthesizedExpression(expression) ? expression.expression : expression
+  if (ts.isConditionalExpression(unwrapped)) {
+    conditions.push(unwrapped.condition)
+    flattenChildArms(unwrapped.whenTrue, conditions, arms)
+    flattenChildArms(unwrapped.whenFalse, conditions, arms)
+    return
+  }
+  if (ts.isBinaryExpression(unwrapped)) {
+    const operator = unwrapped.operatorToken.kind
+    if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
+      conditions.push(unwrapped.left)
+      flattenChildArms(unwrapped.right, conditions, arms)
+      arms.push({kind: 'absent'})
+      return
+    }
+    if (operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken) {
+      conditions.push(unwrapped.left)
+      flattenChildArms(unwrapped.left, conditions, arms)
+      flattenChildArms(unwrapped.right, conditions, arms)
+      return
+    }
+    arms.push({kind: 'opaque'})
+    return
+  }
+  if (ts.isJsxElement(unwrapped)) {
+    arms.push({kind: 'element', opening: unwrapped.openingElement})
+    return
+  }
+  if (ts.isJsxSelfClosingElement(unwrapped)) {
+    arms.push({kind: 'element', opening: unwrapped})
+    return
+  }
+  // Renders nothing: null, undefined, booleans, and the empty string.
+  if (unwrapped.kind === ts.SyntaxKind.NullKeyword
+    || unwrapped.kind === ts.SyntaxKind.TrueKeyword || unwrapped.kind === ts.SyntaxKind.FalseKeyword
+    || (ts.isIdentifier(unwrapped) && unwrapped.text === 'undefined')
+    || (ts.isStringLiteralLike(unwrapped) && unwrapped.text === '')) {
+    arms.push({kind: 'absent'})
+    return
+  }
+  arms.push({kind: 'opaque'})
+}
+
+function auditConditionalChild(
+  container: ts.JsxExpression,
+  sourceFile: ts.SourceFile,
+  audit: StateGeometryFileAudit,
+  context: {
+    propIndex: PropLiteralIndex | undefined
+    resolveName: (name: string) => ts.Expression | null
+    insideOverlay: boolean
+    tailwind: boolean
+  },
+): void {
+  const expression = container.expression
+  if (expression == null) return
+  const unwrapped = ts.isParenthesizedExpression(expression) ? expression.expression : expression
+  const conditionalForm = ts.isConditionalExpression(unwrapped)
+    || (ts.isBinaryExpression(unwrapped) && (
+      unwrapped.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+      || unwrapped.operatorToken.kind === ts.SyntaxKind.BarBarToken
+      || unwrapped.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken))
+  if (!conditionalForm) return
+  const conditions: ts.Expression[] = []
+  const arms: ChildArm[] = []
+  flattenChildArms(unwrapped, conditions, arms)
+  const line = sourceFile.getLineAndCharacterOfPosition(container.getStart(sourceFile)).line + 1
+  if (arms.some(arm => arm.kind === 'opaque')) {
+    audit.coverage.push({file: audit.file, line, reason: 'dynamicChildBranch'})
+  }
+  const compared = arms.filter(arm => arm.kind !== 'opaque')
+  if (compared.length < 2 || !compared.some(arm => arm.kind === 'element')) return
+
+  // Representative root geometry per arm: the first extracted className branch (the root's own
+  // conditionality is the className channel's claim, not this one's) and the first style branch.
+  const rootTokens = (opening: ts.JsxOpeningElement | ts.JsxSelfClosingElement): string[] => {
+    const attribute = opening.attributes.properties.find((property): property is ts.JsxAttribute =>
+      ts.isJsxAttribute(property) && ts.isIdentifier(property.name)
+      && (property.name.text === 'className' || property.name.text === 'class'))
+    const initializer = attribute?.initializer
+    const attributeExpression = initializer == null
+      ? null
+      : ts.isStringLiteral(initializer)
+        ? initializer
+        : ts.isJsxExpression(initializer) && initializer.expression != null
+          ? initializer.expression
+          : null
+    if (attributeExpression == null) return []
+    return extractBranches(attributeExpression).branches[0] ?? []
+  }
+  const rootStyle = (opening: ts.JsxOpeningElement | ts.JsxSelfClosingElement): StyleBranch => {
+    const attribute = opening.attributes.properties.find((property): property is ts.JsxAttribute =>
+      ts.isJsxAttribute(property) && ts.isIdentifier(property.name) && property.name.text === 'style')
+    const initializer = attribute?.initializer
+    if (initializer == null || !ts.isJsxExpression(initializer) || initializer.expression == null) {
+      return new Map()
+    }
+    const branches = extractStyleBranches(
+      resolveOneHop(initializer.expression, context.resolveName), sourceFile, context.resolveName, [])
+    return branches?.[0] ?? new Map()
+  }
+
+  const {mobility, evidence} = classifyDiscriminants(conditions, container, sourceFile, context.propIndex)
+  // An absent arm is vacuously bounded: nothing in flow. An element arm is bounded when it is
+  // out of normal flow in every branch of its own className — an appearing overlay cannot
+  // displace a sibling, however live its discriminant.
+  const armBounded = (arm: ChildArm): boolean =>
+    arm.kind === 'absent' || (context.tailwind && arm.kind === 'element' && elementAlwaysOutOfFlow(arm.opening))
+  const base = compared[0]!
+  for (let index = 1; index < compared.length; index++) {
+    const other = compared[index]!
+    if (base.kind === 'absent' && other.kind === 'absent') continue
+    const involvesAbsent = base.kind === 'absent' || other.kind === 'absent'
+    const selfBounded = armBounded(base) && armBounded(other)
+    const bounded = selfBounded || context.insideOverlay
+    const overlayClause = (overlay: boolean): string | null =>
+      overlay ? selfBounded ? 'out of flow in every branch' : 'inside an out-of-flow ancestor' : null
+    const absentClause = involvesAbsent ? 'one branch renders no element' : null
+    let emitted = false
+
+    const tokenDifferences = context.tailwind
+      ? compareTokensAcrossIntervals(
+        base.kind === 'element' ? rootTokens(base.opening) : [],
+        other.kind === 'element' ? rootTokens(other.opening) : [])
+      : []
+    for (const difference of tokenDifferences) {
+      // Two mounted elements disagreeing on position toggle the flow mode — the opposite of an
+      // overlay; an element appearing against nothing keeps its bound whatever families differ.
+      const overlay = bounded && (involvesAbsent || !difference.keys.includes('position'))
+      const clauses = [evidence, absentClause, overlayClause(overlay)].filter(clause => clause != null)
+      audit.findings.push({
+        file: audit.file,
+        line,
+        kind: 'childGeometry',
+        severity: liveSeverity(mobility, transformOnlyFamilies(difference.keys) || overlay),
+        evidence: clauses.join('; '),
+        magnitudePx: difference.magnitudePx,
+        detail: `branch roots disagree${difference.label == null ? '' : ` ${difference.label}`}: `
+          + difference.detail.replace('state shifts layout: ', ''),
+      })
+      emitted = true
+    }
+
+    let sawDynamicDisagreement = false
+    const reported = new Set<string>()
+    for (const [cssName, difference] of compareStyleBranches(
+      base.kind === 'element' ? rootStyle(base.opening) : new Map(),
+      other.kind === 'element' ? rootStyle(other.opening) : new Map())) {
+      if (difference == null) {
+        sawDynamicDisagreement = true
+        continue
+      }
+      if (reported.has(cssName + difference.detail)) continue
+      reported.add(cssName + difference.detail)
+      const overlay = bounded && (involvesAbsent || (cssName !== 'display' && cssName !== 'position'))
+      const clauses = [
+        evidence,
+        absentClause,
+        difference.unproven ? 'a runtime branch differs unless proven equal' : null,
+        overlayClause(overlay),
+      ].filter(clause => clause != null)
+      audit.findings.push({
+        file: audit.file,
+        line,
+        kind: 'childGeometry',
+        severity: liveSeverity(mobility, overlay),
+        evidence: clauses.join('; '),
+        magnitudePx: difference.magnitudePx,
+        detail: `branch root style ${cssName} ${difference.detail}`,
+      })
+      emitted = true
+    }
+    if (sawDynamicDisagreement) {
+      audit.coverage.push({file: audit.file, line, reason: 'dynamicChildBranch'})
+    }
+    if (emitted) break
+  }
 }
 
 function collectInstance(
@@ -1397,6 +1608,10 @@ function compareBranchBoxes(
   }
   shifts.push(...conflicts)
   const categorical: string[] = []
+  // A categorical family whose two sides both normalize to pixels (h-7 vs h-4, text-sm vs
+  // text-lg, opposite translate spellings) is decidable arithmetic: it ranks by its delta
+  // instead of hiding behind a null magnitude.
+  let quantifiedCategorical = false
   const families = new Set([...base.categorical.keys(), ...other.categorical.keys()])
   for (const family of [...families].sort()) {
     const from = base.categorical.get(family)
@@ -1404,15 +1619,27 @@ function compareBranchBoxes(
     if (from !== to) {
       categorical.push(`${family} '${from ?? 'none'}' vs '${to ?? 'none'}'`)
       keys.push(family)
+      const fromPx = categoricalPixels(from)
+      const toPx = categoricalPixels(to)
+      if (fromPx != null && toPx != null) {
+        magnitude = Math.max(magnitude, Math.abs(toPx - fromPx))
+        quantifiedCategorical = true
+      }
     }
   }
   if (shifts.length === 0 && categorical.length === 0) return null
   const parts = [...shifts, ...categorical]
   return {
     detail: `state shifts layout: ${parts.join(', ')}`,
-    magnitudePx: shifts.length > 0 ? magnitude : null,
+    magnitudePx: shifts.length > 0 || quantifiedCategorical ? magnitude : null,
     keys,
   }
+}
+
+function categoricalPixels(text: string | undefined): number | null {
+  if (text == null) return null
+  const match = text.match(/^(-?\d+(?:\.\d+)?)px$/)
+  return match == null ? null : Number(match[1])
 }
 
 function signed(value: number): string {
@@ -1471,12 +1698,15 @@ export function formatStateGeometryReport(
   instanceFindings: StateGeometryFinding[] = [],
 ): string {
   const data = stateGeometryReportData(audits, instanceFindings)
-  const kindText = (finding: StateGeometryFinding): string =>
-    finding.kind === 'branchGeometry'
-      ? 'state changes geometry'
-      : finding.kind === 'variantGeometry'
-        ? 'state variant changes geometry'
-        : 'component instances disagree on geometry'
+  const kindText = (finding: StateGeometryFinding): string => {
+    switch (finding.kind) {
+      case 'branchGeometry': return 'state changes geometry'
+      case 'variantGeometry': return 'state variant changes geometry'
+      case 'instanceGeometry': return 'component instances disagree on geometry'
+      case 'styleGeometry': return 'state changes style geometry'
+      case 'childGeometry': return 'conditional children change geometry'
+    }
+  }
   const lines = data.findings.map(finding =>
     `[${finding.severity}] ${finding.file}:${finding.line} ${kindText(finding)}: ${finding.detail}`
     + `${finding.anchor == null ? '' : ` (vs ${finding.anchor.file}:${finding.anchor.line})`}`

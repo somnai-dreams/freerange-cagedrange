@@ -460,6 +460,115 @@ export function Cards() {
   })
 })
 
+describe('conditional-child geometry', () => {
+  test('the field-report shape: a title-edit ternary swaps a text line for an input cluster', () => {
+    // Miss 3 verbatim: entering edit swaps a 17.5px text line for a 28px input row. The scan's
+    // className channel saw nothing because the conditional is the ELEMENT, not a class string.
+    const result = auditStateGeometrySource('HoverMoodboard.tsx', `
+export function Card({profile}) {
+  const [isEditing, setIsEditing] = useState(false)
+  return <div className="h-12 min-h-fit">
+    {isEditing ? (
+      <div className="pointer-events-auto w-full flex items-center">
+        <input className="py-0.5 h-7 text-sm leading-tight" />
+      </div>
+    ) : (
+      <div className="relative line-clamp-1 text-sm font-semibold leading-tight">
+        {profile.title}
+      </div>
+    )}
+  </div>
+}
+`)
+    const child = result.findings.filter(finding => finding.kind === 'childGeometry')
+    expect(child).toHaveLength(1)
+    expect(child[0]!.severity).toBe('shift')
+    expect(child[0]!.evidence).toContain("'isEditing' comes from a hook")
+    expect(child[0]!.detail).toContain("display 'flex' vs 'none'")
+  })
+
+  test('token swaps between branch roots quantify when both sides resolve to pixels', () => {
+    const result = auditStateGeometrySource('State.tsx', `
+export function Row() {
+  const [open, setOpen] = useState(false)
+  return <div>{open ? <div className="h-7" /> : <div className="h-4" />}</div>
+}
+`)
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0]).toMatchObject({kind: 'childGeometry', severity: 'shift', magnitudePx: 12})
+    expect(result.findings[0]!.detail).toContain("h '28px' vs '16px'")
+  })
+
+  test('an appearing in-flow child is a shift; an always-out-of-flow one is motion', () => {
+    const appearing = auditStateGeometrySource('State.tsx', `
+export function Row() {
+  const [open, setOpen] = useState(false)
+  return <div>{open && <div className="h-7" />}</div>
+}
+`)
+    expect(appearing.findings).toHaveLength(1)
+    expect(appearing.findings[0]).toMatchObject({kind: 'childGeometry', severity: 'shift'})
+    expect(appearing.findings[0]!.evidence).toContain('one branch renders no element')
+
+    const overlay = auditStateGeometrySource('State.tsx', `
+export function Row() {
+  const [open, setOpen] = useState(false)
+  return <div>{open && <div className="absolute bottom-0 h-7" />}</div>
+}
+`)
+    expect(overlay.findings).toHaveLength(1)
+    expect(overlay.findings[0]).toMatchObject({kind: 'childGeometry', severity: 'motion'})
+    expect(overlay.findings[0]!.evidence).toContain('out of flow in every branch')
+  })
+
+  test('paint-only swaps are clean; a branch the scan cannot read is coverage, never silent', () => {
+    const painted = auditStateGeometrySource('State.tsx', `
+export function Row() {
+  const [open, setOpen] = useState(false)
+  return <div>{open ? <span className="text-white" /> : <span className="text-black" />}</div>
+}
+`)
+    expect(painted.findings).toEqual([])
+    expect(painted.coverage).toEqual([])
+
+    const opaque = auditStateGeometrySource('State.tsx', `
+export function Row({items, open}) {
+  return <div>{open ? <div className="h-7" /> : items.map(item => <div key={item} />)}</div>
+}
+`)
+    expect(opaque.findings).toEqual([])
+    expect(opaque.coverage).toEqual([{file: 'State.tsx', line: 3, reason: 'dynamicChildBranch'}])
+  })
+
+  test('branch root style literals compare like the style-attribute channel', () => {
+    const result = auditStateGeometrySource('State.tsx', `
+export function Row() {
+  const [open, setOpen] = useState(false)
+  return <div>{open ? <div style={{height: 240}} /> : <div style={{height: 120}} />}</div>
+}
+`)
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0]).toMatchObject({kind: 'childGeometry', severity: 'shift', magnitudePx: 120})
+    expect(result.findings[0]!.detail).toContain('branch root style height')
+  })
+
+  test('without Tailwind the token comparison sits out and style roots still compare', () => {
+    const source = `
+export function Row() {
+  const [open, setOpen] = useState(false)
+  return <div>{open ? <div className="h-7" style={{width: 240}} /> : <div className="h-4" style={{width: 120}} />}</div>
+}
+`
+    const gated = auditStateGeometrySource('State.tsx', source, {tailwind: false})
+    expect(gated.findings).toHaveLength(1)
+    expect(gated.findings[0]!.detail).toContain('branch root style width')
+
+    const full = auditStateGeometrySource('State.tsx', source)
+    expect(full.findings.map(finding => finding.detail).sort().join(' | '))
+      .toContain("h '28px' vs '16px'")
+  })
+})
+
 // A minimal project scan over synthesized files: shared registry and prop index, per-file
 // audits, then the cross-file instance comparison — the same wiring the project runner uses.
 function auditProject(
