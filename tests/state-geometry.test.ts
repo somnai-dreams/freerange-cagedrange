@@ -41,6 +41,91 @@ export function Panel() {
   })
 })
 
+describe('style-attribute geometry', () => {
+  test('the field-report shape: a const ternary with a runtime branch feeding style aspect-ratio', () => {
+    // Verbatim idiom from the miss report: the discriminating ternary lives in a local const,
+    // one branch is a literal, the other a runtime prop. The value is unknowable; the claim —
+    // branches disagree unless proven equal — is not.
+    const audit = auditStateGeometrySource('State.tsx', `
+export function SrefThumb({previewUrl, previewLoading, previewAspectRatio}) {
+  const containerAspectRatio =
+    (previewUrl || previewLoading) && previewAspectRatio ? previewAspectRatio : '16/9'
+  return <div style={{ aspectRatio: containerAspectRatio }} />
+}
+`)
+    expect(audit.findings).toHaveLength(1)
+    expect(audit.findings[0]).toMatchObject({kind: 'styleGeometry', magnitudePx: null})
+    expect(audit.findings[0]!.detail).toContain('aspect-ratio')
+    expect(audit.findings[0]!.detail).toContain("'16/9'")
+    expect(audit.findings[0]!.evidence).toContain('differs unless proven equal')
+  })
+
+  test('literal-vs-literal quantifies; identical dynamic text is proven equal; hooks make it shift', () => {
+    const quantified = auditStateGeometrySource('State.tsx', `
+export function Panel() {
+  const [expanded, setExpanded] = useState(false)
+  return <div style={{ height: expanded ? 240 : '120px' }} />
+}
+`)
+    expect(quantified.findings).toHaveLength(1)
+    expect(quantified.findings[0]).toMatchObject({kind: 'styleGeometry', severity: 'shift', magnitudePx: 120})
+
+    const provenEqual = auditStateGeometrySource('State.tsx', `
+export function Panel({size, open}) {
+  return <div style={open ? {width: size, display: 'flex'} : {width: size, display: 'flex'}} />
+}
+`)
+    expect(provenEqual.findings).toEqual([])
+    expect(provenEqual.coverage).toEqual([])
+  })
+
+  test('unextractable style attributes and dynamic disagreements are coverage, never silent', () => {
+    const opaque = auditStateGeometrySource('State.tsx', `
+export function Panel({styles}) {
+  return <div style={styles.container} />
+}
+`)
+    expect(opaque.findings).toEqual([])
+    expect(opaque.coverage).toEqual([{file: 'State.tsx', line: 3, reason: 'dynamicStylePart'}])
+
+    // Two different runtime expressions: could be equal at runtime, so no finding — coverage.
+    const disagreeing = auditStateGeometrySource('State.tsx', `
+export function Panel({a, b, open}) {
+  return <div style={{ width: open ? a : b }} />
+}
+`)
+    expect(disagreeing.findings).toEqual([])
+    expect(disagreeing.coverage).toEqual([{file: 'State.tsx', line: 3, reason: 'dynamicStylePart'}])
+
+    // Unmodeled properties never enter the claim: a conditional color is not geometry.
+    const painted = auditStateGeometrySource('State.tsx', `
+export function Panel({open}) {
+  return <div style={{ color: open ? 'red' : 'blue' }} />
+}
+`)
+    expect(painted.findings).toEqual([])
+    expect(painted.coverage).toEqual([])
+  })
+
+  test('shorthand style properties resolve through the same scope', () => {
+    const shorthand = auditStateGeometrySource('State.tsx', `
+export function Card({previewUrl, previewLoading, previewAspectRatio}) {
+  const aspectRatio = (previewUrl || previewLoading) && previewAspectRatio ? previewAspectRatio : '2/1'
+  return <div style={{ aspectRatio }} />
+}
+`)
+    expect(shorthand.findings).toHaveLength(1)
+    expect(shorthand.findings[0]).toMatchObject({kind: 'styleGeometry'})
+    expect(shorthand.findings[0]!.detail).toContain("'2/1'")
+  })
+
+  test('aspect utility tokens are geometry: a state-variant aspect change is a finding', () => {
+    const snapped = audit(`<div className="aspect-video hover:aspect-square" />`)
+    expect(snapped.findings).toHaveLength(1)
+    expect(snapped.findings[0]!.detail).toContain('aspect')
+  })
+})
+
 describe('state-variant geometry scan', () => {
   test('a conditional border width is a finding; a reserved border varying only in color is clean', () => {
     const shifting = audit(`<button className={active ? 'border border-light-300' : ''} />`)

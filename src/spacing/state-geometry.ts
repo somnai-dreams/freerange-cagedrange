@@ -10,10 +10,13 @@ import * as ts from 'typescript'
 export type StateGeometryFinding = {
   file: string
   line: number
-  kind: 'branchGeometry' | 'variantGeometry' | 'instanceGeometry'
+  kind: 'branchGeometry' | 'variantGeometry' | 'instanceGeometry' | 'styleGeometry'
   // branchGeometry: two extracted branches evaluate to different local box geometry.
   // variantGeometry: a state-variant token adds or changes geometry with no matching base token.
   // instanceGeometry: two call sites of the same component evaluate to different effective boxes.
+  // styleGeometry: branches of a conditional inside a style attribute disagree on a modeled
+  // property — literal against literal quantifies, literal against a runtime value differs
+  // unless proven equal, and identical source text on both sides IS proven equal.
   detail: string
   // Largest per-edge pixel delta when the difference is quantifiable, null for categorical
   // changes (display, position, symbolic sizes). Reports rank by magnitude.
@@ -35,7 +38,7 @@ export type StateGeometryFinding = {
 export type StateGeometryCoverage = {
   file: string
   line: number
-  reason: 'dynamicClassPart' | 'branchFanOut'
+  reason: 'dynamicClassPart' | 'branchFanOut' | 'dynamicStylePart'
 }
 
 export type StateGeometryFileAudit = {
@@ -124,6 +127,7 @@ function classifyDiscriminants(
   let sawUnknown = false
   let mobileEvidence: string | null = null
   let immobileEvidence: string | null = null
+  const unresolvedNames: string[] = []
   const enclosing = enclosingComponent(attribute)
   const bindings = localBindingIndex(sourceFile)
   for (const condition of conditions) {
@@ -149,13 +153,26 @@ function classifyDiscriminants(
           continue
         }
         sawUnknown = true
+        unresolvedNames.push(name)
         continue
       }
       sawUnknown = true
+      unresolvedNames.push(name)
     }
   }
   if (mobileEvidence != null) return {mobility: 'mobile', evidence: mobileEvidence}
-  if (sawUnknown) return {mobility: 'unknown', evidence: 'the discriminant could not be resolved'}
+  if (sawUnknown) {
+    // Naming the roots makes unresolved findings legible AND makes cross-tree deltas sensitive
+    // to discriminant changes: gating the same geometry on a different condition set is a real
+    // semantic change even when the geometry claim reads identically.
+    const named = [...new Set(unresolvedNames)].slice(0, 4)
+    return {
+      mobility: 'unknown',
+      evidence: named.length === 0
+        ? 'the discriminant could not be resolved'
+        : `unresolved discriminants: ${named.join(', ')}`,
+    }
+  }
   return {mobility: 'immobile', evidence: immobileEvidence ?? 'the discriminants never change while mounted'}
 }
 
@@ -422,10 +439,48 @@ export function auditStateGeometryFile(
   // The overlay flag travels down the JSX tree during the one visit pass (program-loaded source
   // files carry no parent pointers, so ancestry cannot be walked upward). An element's own
   // className is judged from outside its overlay: only its JSX children inherit the containment.
+  // Const initializers resolve through lexical scopes built during the same descent: a name
+  // looks up the innermost enclosing function's declaration, so two components declaring the
+  // same const name never collide. Declarations register in source order, before the JSX that
+  // reads them is visited.
+  const scopeStack: Array<Map<string, ts.Expression>> = [new Map<string, ts.Expression>()]
+  const resolveName = (name: string): ts.Expression | null => {
+    for (let index = scopeStack.length - 1; index >= 0; index--) {
+      const found = scopeStack[index]!.get(name)
+      if (found != null) return found
+    }
+    return null
+  }
   const visit = (node: ts.Node, insideOverlay: boolean): void => {
-    if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name)
-      && (node.name.text === 'className' || node.name.text === 'class')) {
-      auditClassAttribute(node, sourceFile, audit, propIndex, insideOverlay)
+    if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)
+      || ts.isMethodDeclaration(node)) {
+      scopeStack.push(new Map<string, ts.Expression>())
+      ts.forEachChild(node, child => { visit(child, insideOverlay) })
+      scopeStack.pop()
+      return
+    }
+    // The const flag lives on the declaration LIST and must be read there: the combined-flags
+    // helper walks parent pointers, which program-loaded source files do not have.
+    if (ts.isVariableDeclarationList(node) && (node.flags & ts.NodeFlags.Const) !== 0) {
+      for (const declaration of node.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer != null) {
+          scopeStack[scopeStack.length - 1]!.set(declaration.name.text, declaration.initializer)
+        }
+      }
+    }
+    if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
+      for (const property of node.attributes.properties) {
+        if (!ts.isJsxAttribute(property) || !ts.isIdentifier(property.name)) continue
+        if (property.name.text === 'className' || property.name.text === 'class') {
+          auditClassAttribute(property, sourceFile, audit, propIndex, insideOverlay)
+        } else if (property.name.text === 'style') {
+          auditStyleAttribute(property, sourceFile, audit, {
+            propIndex,
+            resolveName,
+            insideOverlay: insideOverlay || elementAlwaysOutOfFlow(node),
+          })
+        }
+      }
     }
     if (registry != null && (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
       && ts.isIdentifier(node.tagName)) {
@@ -450,7 +505,7 @@ export function auditStateGeometryFile(
 // Whether an intrinsic element is out of normal flow in every branch of its own className. Only
 // intrinsic elements make the claim (a component's className lands who knows where), and a
 // className that cannot be fully extracted makes no claim at all.
-function elementAlwaysOutOfFlow(opening: ts.JsxOpeningElement): boolean {
+function elementAlwaysOutOfFlow(opening: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
   if (!ts.isIdentifier(opening.tagName) || !/^[a-z]/.test(opening.tagName.text)) return false
   const className = opening.attributes.properties.find((property): property is ts.JsxAttribute =>
     ts.isJsxAttribute(property) && ts.isIdentifier(property.name) && property.name.text === 'className')
@@ -466,6 +521,207 @@ function elementAlwaysOutOfFlow(opening: ts.JsxOpeningElement): boolean {
   const extraction = extractBranches(expression, undefined, [])
   return extraction.complete && extraction.branches.length > 0
     && extraction.branches.every(branch => outOfFlowTokens(branch))
+}
+
+// The inline-style properties the scan models: reflow levers a JSX author reaches for through
+// style={{...}} when no utility token fits — a data-driven aspect ratio, a measured width.
+// Everything else in a style object is ignored; a modeled property (or the whole attribute)
+// that resists extraction becomes a dynamicStylePart coverage record, never a silent gap.
+const modeledStyleProperties = new Map<string, string>([
+  ['aspectRatio', 'aspect-ratio'],
+  ['width', 'width'], ['height', 'height'],
+  ['minWidth', 'min-width'], ['minHeight', 'min-height'],
+  ['maxWidth', 'max-width'], ['maxHeight', 'max-height'],
+  ['top', 'top'], ['right', 'right'], ['bottom', 'bottom'], ['left', 'left'],
+  ['display', 'display'], ['position', 'position'],
+])
+
+type StyleValue = {kind: 'literal' | 'dynamic'; text: string}
+type StyleBranch = Map<string, StyleValue>
+
+const styleBranchLimit = 8
+
+function auditStyleAttribute(
+  attribute: ts.JsxAttribute,
+  sourceFile: ts.SourceFile,
+  audit: StateGeometryFileAudit,
+  context: {
+    propIndex: PropLiteralIndex | undefined
+    resolveName: (name: string) => ts.Expression | null
+    insideOverlay: boolean
+  },
+): void {
+  const initializer = attribute.initializer
+  if (initializer == null || !ts.isJsxExpression(initializer) || initializer.expression == null) return
+  const line = sourceFile.getLineAndCharacterOfPosition(attribute.getStart(sourceFile)).line + 1
+  const conditions: ts.Expression[] = []
+  const branches = extractStyleBranches(
+    resolveOneHop(initializer.expression, context.resolveName),
+    sourceFile,
+    context.resolveName,
+    conditions,
+  )
+  if (branches == null) {
+    audit.coverage.push({file: audit.file, line, reason: 'dynamicStylePart'})
+    return
+  }
+  let sawDynamicDisagreement = false
+  if (branches.length > 1) {
+    const {mobility, evidence} = classifyDiscriminants(conditions, attribute, sourceFile, context.propIndex)
+    const reported = new Set<string>()
+    for (let index = 1; index < branches.length; index++) {
+      for (const [cssName, difference] of compareStyleBranches(branches[0]!, branches[index]!)) {
+        if (difference == null) {
+          sawDynamicDisagreement = true
+          continue
+        }
+        if (reported.has(cssName + difference.detail)) continue
+        reported.add(cssName + difference.detail)
+        const clauses = [
+          evidence,
+          difference.unproven ? 'a runtime branch differs unless proven equal' : null,
+          context.insideOverlay ? 'out of flow in every branch' : null,
+        ].filter(clause => clause != null)
+        audit.findings.push({
+          file: audit.file,
+          line,
+          kind: 'styleGeometry',
+          severity: liveSeverity(mobility, context.insideOverlay
+            && cssName !== 'display' && cssName !== 'position'),
+          evidence: clauses.join('; '),
+          magnitudePx: difference.magnitudePx,
+          detail: `style ${cssName} ${difference.detail}`,
+        })
+      }
+    }
+  }
+  // A dynamic value that agrees across every branch is state-invariant: no state claim is
+  // missable, so only disagreeing runtime values (and unextractable attributes) are coverage.
+  if (sawDynamicDisagreement) {
+    audit.coverage.push({file: audit.file, line, reason: 'dynamicStylePart'})
+  }
+}
+
+function resolveOneHop(
+  expression: ts.Expression,
+  resolveName: (name: string) => ts.Expression | null,
+): ts.Expression {
+  const unwrapped = ts.isParenthesizedExpression(expression) ? expression.expression : expression
+  if (ts.isIdentifier(unwrapped)) {
+    const initializer = resolveName(unwrapped.text)
+    if (initializer != null) return initializer
+  }
+  return unwrapped
+}
+
+// Branches of the whole style attribute: a plain object literal is one branch; a ternary of
+// resolvable expressions multiplies branches (conditions recorded for mobility); anything else
+// is unextractable — null, meaning the caller records coverage and claims nothing.
+function extractStyleBranches(
+  expression: ts.Expression,
+  sourceFile: ts.SourceFile,
+  resolveName: (name: string) => ts.Expression | null,
+  conditions: ts.Expression[],
+): StyleBranch[] | null {
+  const unwrapped = ts.isParenthesizedExpression(expression) ? expression.expression : expression
+  if (ts.isConditionalExpression(unwrapped)) {
+    conditions.push(unwrapped.condition)
+    const whenTrue = extractStyleBranches(resolveOneHop(unwrapped.whenTrue, resolveName), sourceFile, resolveName, conditions)
+    const whenFalse = extractStyleBranches(resolveOneHop(unwrapped.whenFalse, resolveName), sourceFile, resolveName, conditions)
+    if (whenTrue == null || whenFalse == null) return null
+    const merged = [...whenTrue, ...whenFalse]
+    return merged.length > styleBranchLimit ? merged.slice(0, styleBranchLimit) : merged
+  }
+  if (!ts.isObjectLiteralExpression(unwrapped)) return null
+  let branches: StyleBranch[] = [new Map()]
+  for (const property of unwrapped.properties) {
+    if (ts.isSpreadAssignment(property)) return null
+    // `{ aspectRatio }` shorthand reads the like-named binding; the scope resolver turns it into
+    // the same value expression a longhand assignment would carry.
+    const shorthand = ts.isShorthandPropertyAssignment(property)
+    if (!shorthand && !ts.isPropertyAssignment(property)) return null
+    const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : null
+    if (name == null) return null
+    const cssName = modeledStyleProperties.get(name)
+    if (cssName == null) continue
+    const value = shorthand
+      ? resolveName(name) ?? property.name
+      : resolveOneHop(property.initializer, resolveName)
+    if (ts.isConditionalExpression(value)) {
+      conditions.push(value.condition)
+      const whenTrue = styleValueOf(resolveOneHop(value.whenTrue, resolveName), sourceFile)
+      const whenFalse = styleValueOf(resolveOneHop(value.whenFalse, resolveName), sourceFile)
+      branches = branches.flatMap(branch => [
+        new Map(branch).set(cssName, whenTrue),
+        new Map(branch).set(cssName, whenFalse),
+      ])
+      if (branches.length > styleBranchLimit) branches = branches.slice(0, styleBranchLimit)
+      continue
+    }
+    const resolved = styleValueOf(value, sourceFile)
+    for (const branch of branches) branch.set(cssName, resolved)
+  }
+  return branches
+}
+
+// getText must receive the source file explicitly: program-loaded nodes carry no parent
+// pointers, and the argless overload walks them.
+function styleValueOf(expression: ts.Expression, sourceFile: ts.SourceFile): StyleValue {
+  if (ts.isStringLiteralLike(expression)) return {kind: 'literal', text: expression.text}
+  if (ts.isNumericLiteral(expression)) return {kind: 'literal', text: expression.text}
+  if (ts.isPrefixUnaryExpression(expression) && expression.operator === ts.SyntaxKind.MinusToken
+    && ts.isNumericLiteral(expression.operand)) {
+    return {kind: 'literal', text: `-${expression.operand.text}`}
+  }
+  return {kind: 'dynamic', text: expression.getText(sourceFile)}
+}
+
+// Per-property comparison between two style branches. A map entry of null marks a
+// dynamic-against-dynamic disagreement — not decidable, so the caller records coverage instead
+// of claiming a finding.
+function compareStyleBranches(
+  base: StyleBranch,
+  other: StyleBranch,
+): Map<string, {detail: string; magnitudePx: number | null; unproven: boolean} | null> {
+  const results = new Map<string, {detail: string; magnitudePx: number | null; unproven: boolean} | null>()
+  for (const cssName of new Set([...base.keys(), ...other.keys()])) {
+    const from = base.get(cssName)
+    const to = other.get(cssName)
+    if (from == null || to == null) {
+      const present = (from ?? to)!
+      results.set(cssName, {
+        detail: from == null
+          ? `unset vs ${renderStyleValue(present)}`
+          : `${renderStyleValue(present)} vs unset`,
+        magnitudePx: null,
+        unproven: present.kind === 'dynamic',
+      })
+      continue
+    }
+    if (from.text === to.text && from.kind === to.kind) continue
+    if (from.kind === 'dynamic' && to.kind === 'dynamic') {
+      results.set(cssName, null)
+      continue
+    }
+    const fromPx = literalPixels(from)
+    const toPx = literalPixels(to)
+    results.set(cssName, {
+      detail: `${renderStyleValue(from)} vs ${renderStyleValue(to)}`,
+      magnitudePx: fromPx != null && toPx != null ? Math.abs(toPx - fromPx) : null,
+      unproven: from.kind === 'dynamic' || to.kind === 'dynamic',
+    })
+  }
+  return results
+}
+
+function renderStyleValue(value: StyleValue): string {
+  return value.kind === 'literal' ? `'${value.text}'` : `dynamic \`${value.text}\``
+}
+
+function literalPixels(value: StyleValue): number | null {
+  if (value.kind !== 'literal') return null
+  const match = value.text.match(/^(-?\d+(?:\.\d+)?)(px)?$/)
+  return match == null ? null : Number(match[1])
 }
 
 function collectInstance(
@@ -1114,6 +1370,10 @@ export function classifyToken(rawToken: string): TokenClassification {
 
   if (displayUtilities.has(bare)) return {kind: 'geometry', family: 'display', value: bare, variants, important}
   if (positionUtilities.has(bare)) return {kind: 'geometry', family: 'position', value: bare, variants, important}
+  if (bare.startsWith('aspect-')) {
+    // aspect-ratio couples inline size to block size: a reflow lever with no length token.
+    return {kind: 'geometry', family: 'aspect', value: bare.slice('aspect-'.length), variants, important}
+  }
   if (bare === 'grow' || bare === 'shrink' || bare === 'flex-1' || bare === 'flex-auto' || bare === 'flex-none' || bare === 'flex-initial') {
     return {kind: 'geometry', family: 'flex', value: bare, variants, important}
   }
