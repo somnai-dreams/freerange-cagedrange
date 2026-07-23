@@ -261,9 +261,13 @@ resolve; every other appearance of a class — pseudo-classes, combinators' subj
 conditional at-rules — shadows the specific properties it declares, so a `:focus` rule that only
 recolors blocks nothing while one that changes `line-height` makes the claim unknown with that
 reason. Pseudo-element rules style a generated box and never shadow. The same property declared
-for the same class in two stylesheets is a conflict (load order is unknowable statically), and a
-class whose geometry lives only in generated CSS — a bare Tailwind utility — resolves to an
-honest unknown naming the class. `assume.contextFontSizePx` declares an inherited font size the
+for the same class in two stylesheets is a conflict (load order is unknowable statically). A
+class no stylesheet declares that is a recognized bare Tailwind utility evaluates from the
+default scale instead — spacing margins and paddings (fractional and arbitrary values included),
+heights, `leading-*`, the `text-*` sizes with their paired line heights (`leading-*` wins the
+line-height conflict, matching the emitted utility order), display, `align-*`, and `border`
+widths — so claims work on utility-styled elements with no stylesheet at all; anything
+unrecognized stays an honest unknown naming the class. `assume.contextFontSizePx` declares an inherited font size the
 stylesheets do not state; it is echoed in the report as an assumption, never silently invented.
 
 The rule is metric-free and conservative. Strut = context font-size × line-height (numeric

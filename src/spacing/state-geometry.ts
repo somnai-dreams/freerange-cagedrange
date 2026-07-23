@@ -1357,7 +1357,7 @@ function edgeSpread(family: string): EdgeSpread | null {
 
 // Tailwind's default numeric scale is 4px per step; border widths default to 1px. Values outside
 // the modeled forms return null and stay categorical rather than being guessed.
-function pixelsOf(family: string, value: string): number | null {
+export function pixelsOf(family: string, value: string): number | null {
   const bareFamily = family.startsWith('-') ? family.slice(1) : family
   if (bareFamily.startsWith('border-width')) {
     if (value === '' || value === '1') return value === '' ? 1 : 1

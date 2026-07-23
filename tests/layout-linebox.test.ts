@@ -161,17 +161,51 @@ describe('line-box containment', () => {
     expect(check.kind).toBe('fail')
     if (check.kind === 'fail') expect(check.boxPx).toBeCloseTo(25, 2)
 
-    // The same name with no stylesheet backing (a generated Tailwind utility) is an honest
-    // unknown, not a parse rejection.
+    // The same name with no stylesheet backing evaluates from the Tailwind default scale: the
+    // fractional margin participates in the line and can be the whole overflow — the field
+    // report's third bug, claimable with zero product change.
     const bare = resolveCssClasses(project({
       'src/a.css': `
         .prompt-editable { font-size: 15px; line-height: 1.625; }
         .chip { display: inline-flex; line-height: 23px; }
       `,
     }))
-    const unresolved = checkLineBoxContainment(claim({name: 'chip margin', inline: ['chip', 'mb-0.5']}), bare)
+    const bridged = checkLineBoxContainment(claim({name: 'chip margin', inline: ['chip', 'mb-0.5']}), bare)
+    expect(bridged.kind).toBe('fail')
+    if (bridged.kind === 'fail') {
+      expect(bridged.boxPx).toBeCloseTo(25, 2)
+      expect(bridged.contributions.join(' ')).toContain('margin boxes participate')
+    }
+
+    // A name that is neither stylesheet-declared nor a recognized utility stays unknown.
+    const unresolved = checkLineBoxContainment(claim({name: 'chip margin', inline: ['chip', 'chip-wrapper']}), bare)
     expect(unresolved.kind).toBe('unknown')
-    if (unresolved.kind === 'unknown') expect(unresolved.reason).toContain("'mb-0.5' is not declared")
+    if (unresolved.kind === 'unknown') expect(unresolved.reason).toContain("'chip-wrapper' is not declared")
+  })
+
+  test('a pure-Tailwind inline box needs no stylesheet at all', () => {
+    // text-sm brings the paired default line height (14px/20px); py-1 adds 8px of block
+    // padding; the capsule presents 28px against a 24.38px strut.
+    const index = resolveCssClasses(project({
+      'src/a.css': '.prompt-editable { font-size: 15px; line-height: 1.625; }',
+    }))
+    const overflowing = checkLineBoxContainment(
+      claim({name: 'utility capsule', inline: ['inline-flex', 'text-sm', 'py-1']}),
+      index,
+    )
+    expect(overflowing.kind).toBe('fail')
+    if (overflowing.kind === 'fail') {
+      expect(overflowing.boxPx).toBeCloseTo(28, 2)
+      expect(overflowing.strutPx).toBeCloseTo(24.375, 2)
+    }
+
+    // leading-none shrinks the content line: 14px × 1 + 8px = 22px fits.
+    const fitting = checkLineBoxContainment(
+      claim({name: 'utility capsule', inline: ['inline-flex', 'text-sm', 'leading-none', 'py-1', 'align-middle']}),
+      index,
+    )
+    expect(fitting).toMatchObject({kind: 'pass', verticalAlign: 'middle'})
+    if (fitting.kind === 'pass') expect(fitting.boxPx).toBeCloseTo(22, 2)
   })
 
   test('block-level display is not a line-box question', () => {

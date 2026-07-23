@@ -1,3 +1,4 @@
+import {classifyToken, pixelsOf} from '../spacing/state-geometry.ts'
 import type {CssClassIndex, CssDeclaration} from './css.ts'
 
 // Line-box containment: an inline-level box taller than its formatting context's strut grows the
@@ -42,15 +43,22 @@ type Merged = {
 export function checkLineBoxContainment(claim: LineBoxContainmentClaim, index: CssClassIndex): LineBoxCheck {
   const unknown = (reason: string): LineBoxCheck => ({kind: 'unknown', claim: claim.name, reason})
 
+  const synthesized = new Map<string, Map<string, CssDeclaration>>()
   for (const className of [...claim.context, ...claim.inline]) {
     const taint = index.tainted.get(className)
     if (taint != null) return unknown(`class '${className}' cannot be resolved: ${taint}`)
     if (!index.classes.has(className) && !index.shadowed.has(className)) {
-      return unknown(`class '${className}' is not declared in any discovered stylesheet`)
+      // Not in any stylesheet: a bare Tailwind utility evaluates from the default scale, so
+      // claims work on utility-styled elements too. Anything unrecognized stays unknown.
+      const declarations = synthesizeTailwindClass(className)
+      if (declarations == null) {
+        return unknown(`class '${className}' is not declared in any discovered stylesheet and is not a recognized Tailwind utility`)
+      }
+      synthesized.set(className, declarations)
     }
   }
-  const context = merge(claim.context, index)
-  const inline = merge(claim.inline, index)
+  const context = merge(claim.context, index, synthesized)
+  const inline = merge(claim.inline, index, synthesized)
   if (typeof context === 'string') return unknown(context)
   if (typeof inline === 'string') return unknown(inline)
 
@@ -181,10 +189,15 @@ export function checkLineBoxContainment(claim: LineBoxContainmentClaim, index: C
 // Merge a class list's declarations. Two classes declaring the same property resolve like the
 // cascade only when both declarations sit in the same stylesheet (order decides); across files
 // the load order is unknown and the claim must say so.
-function merge(classNames: readonly string[], index: CssClassIndex): Merged | string {
+function merge(
+  classNames: readonly string[],
+  index: CssClassIndex,
+  synthesized: Map<string, Map<string, CssDeclaration>>,
+): Merged | string {
   const declarations = new Map<string, CssDeclaration>()
   for (const className of classNames) {
-    for (const [property, declaration] of index.classes.get(className) ?? new Map<string, CssDeclaration>()) {
+    for (const [property, declaration] of index.classes.get(className)
+      ?? synthesized.get(className) ?? new Map<string, CssDeclaration>()) {
       const previous = declarations.get(property)
       if (previous == null) {
         declarations.set(property, declaration)
@@ -209,6 +222,80 @@ function merge(classNames: readonly string[], index: CssClassIndex): Merged | st
     get: (property: string) => shadows.get(property) ?? declarations.get(property),
     has: (property: string) => shadows.has(property) || declarations.has(property),
   }
+}
+
+// Tailwind's default scale, as synthesized declarations for claim classes no stylesheet
+// declares. Deliberately the same bounded vocabulary the state-geometry scan evaluates —
+// spacing-scale margins and paddings (fractional and arbitrary values included), heights,
+// leading, the default text sizes with their paired line heights, display, alignment, and
+// borders. The synthetic file name makes a conflict with a real stylesheet read as what it is:
+// utility-versus-stylesheet order, which is not statically knowable.
+const tailwindFile = 'tailwind defaults'
+
+const namedLeading = new Map<string, string>([
+  ['none', '1'], ['tight', '1.25'], ['snug', '1.375'],
+  ['normal', '1.5'], ['relaxed', '1.625'], ['loose', '2'],
+])
+
+const textSizes = new Map<string, {fontPx: number; line: string}>([
+  ['xs', {fontPx: 12, line: '16px'}], ['sm', {fontPx: 14, line: '20px'}],
+  ['base', {fontPx: 16, line: '24px'}], ['lg', {fontPx: 18, line: '28px'}],
+  ['xl', {fontPx: 20, line: '28px'}], ['2xl', {fontPx: 24, line: '32px'}],
+  ['3xl', {fontPx: 30, line: '36px'}], ['4xl', {fontPx: 36, line: '40px'}],
+  ['5xl', {fontPx: 48, line: '1'}], ['6xl', {fontPx: 60, line: '1'}],
+  ['7xl', {fontPx: 72, line: '1'}], ['8xl', {fontPx: 96, line: '1'}],
+  ['9xl', {fontPx: 128, line: '1'}],
+])
+
+const displayUtilityNames = new Set([
+  'block', 'inline', 'inline-block', 'inline-flex', 'inline-grid', 'flex', 'grid', 'hidden',
+])
+
+const verticalAlignUtilities = new Map<string, string>([
+  ['align-baseline', 'baseline'], ['align-top', 'top'],
+  ['align-middle', 'middle'], ['align-bottom', 'bottom'],
+])
+
+function synthesizeTailwindClass(name: string): Map<string, CssDeclaration> | null {
+  // Orders encode Tailwind's own utility layering, so `text-sm leading-none` resolves the
+  // line-height conflict the way the emitted stylesheet does: leading utilities come after
+  // font-size utilities and win.
+  const declare = (entries: Array<[string, string]>, baseOrder = 30): Map<string, CssDeclaration> =>
+    new Map(entries.map(([property, value], offset) =>
+      [property, {value, important: false, order: baseOrder + offset, file: tailwindFile}]))
+
+  if (displayUtilityNames.has(name)) return declare([['display', name]])
+  const align = verticalAlignUtilities.get(name)
+  if (align != null) return declare([['vertical-align', align]])
+  if (name === 'border') return declare([['border-width', '1px']])
+
+  const parsed = classifyToken(name)
+  if (parsed.variants.length > 0 || parsed.kind !== 'geometry') return null
+  const magnitude = pixelsOf(parsed.family, parsed.value)
+  const bare = parsed.family.replace(/^-/, '')
+  const signed = (px: number): string => `${parsed.family.startsWith('-') ? -px : px}px`
+
+  if (bare === 'font-size') {
+    const size = textSizes.get(parsed.value)
+    return size == null ? null : declare([['font-size', `${size.fontPx}px`], ['line-height', size.line]], 10)
+  }
+  if (bare === 'leading') {
+    const named = namedLeading.get(parsed.value)
+    if (named != null) return declare([['line-height', named]], 20)
+    return magnitude == null ? null : declare([['line-height', `${magnitude}px`]], 20)
+  }
+  if (magnitude == null) return null
+  const blockSpread: Record<string, string[]> = {
+    'm': ['margin-top', 'margin-bottom'], 'my': ['margin-top', 'margin-bottom'],
+    'mt': ['margin-top'], 'mb': ['margin-bottom'],
+    'p': ['padding-top', 'padding-bottom'], 'py': ['padding-top', 'padding-bottom'],
+    'pt': ['padding-top'], 'pb': ['padding-bottom'],
+    'h': ['height'], 'min-h': ['min-height'],
+    'border-width': ['border-top-width', 'border-bottom-width'],
+  }
+  const properties = blockSpread[bare]
+  if (properties == null) return null
+  return declare(properties.map(property => [property, signed(magnitude)]))
 }
 
 type Length = {value: number; unit: 'px' | 'em' | 'number'}
