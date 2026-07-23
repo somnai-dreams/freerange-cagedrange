@@ -1,5 +1,5 @@
 import {expect, test} from 'bun:test'
-import {existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
+import {existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
@@ -36,7 +36,7 @@ function writeProject(
       module: 'ESNext',
       ...compilerOptions,
     },
-    include: ['**/*.ts'],
+    include: ['**/*.ts', '**/*.tsx'],
   }))
   for (const [file, source] of Object.entries(files)) {
     const path = join(directory, file)
@@ -715,6 +715,45 @@ test('a file outside the project is rejected in both file modes', () => {
   } finally {
     rmSync(projectDirectory, {recursive: true, force: true})
     rmSync(fixtureDirectory, {recursive: true, force: true})
+  }
+})
+
+test('state-geometry names the resolved project root, making tsconfig walk-up visible', () => {
+  // The field-report failure: running from a subproject without its own tsconfig silently
+  // rescanned the parent project and labeled 710 parent findings as the subproject's. The
+  // resolved root now heads both output formats.
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'freerange-state-geometry-root-'))
+  try {
+    writeProject(projectDirectory, {
+      'App.tsx': `export function App({active}: {active: boolean}) {
+  return <div style={{height: active ? 240 : 120}} />
+}
+`,
+      'prototype/Widget.tsx': `export function Widget() {
+  return <span />
+}
+`,
+    })
+    // The CLI resolves through the real working directory, so symlinked tmpdirs (macOS /var)
+    // must compare through their real path.
+    const realRoot = realpathSync(projectDirectory)
+
+    const fromRoot = runCli(projectDirectory, '--state-geometry')
+    expect(fromRoot.exitCode).toBe(0)
+    expect(fromRoot.stdout.split('\n')[0]).toBe(`project: ${realRoot}`)
+
+    const fromSubproject = runCli(join(projectDirectory, 'prototype'), '--state-geometry')
+    expect(fromSubproject.stdout.split('\n')[0])
+      .toBe(`project: ${realRoot} — resolved upward from the working directory`)
+
+    const json = JSON.parse(runCli(join(projectDirectory, 'prototype'), '--state-geometry', '--json').stdout) as {
+      projectRoot: string
+      findings: unknown[]
+    }
+    expect(json.projectRoot).toBe(realRoot)
+    expect(json.findings.length).toBeGreaterThan(0)
+  } finally {
+    rmSync(projectDirectory, {recursive: true, force: true})
   }
 })
 

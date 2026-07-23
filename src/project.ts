@@ -240,10 +240,12 @@ export function runProjectStateGeometry(searchFrom: string, json = false): boole
   const instanceFindings = compareComponentInstances(audits.flatMap(audit => audit.instances))
   if (json) {
     console.log(JSON.stringify({
+      projectRoot: dirname(configPath),
       ...stateGeometryReportData(audits, instanceFindings, dirname(configPath)),
       tailwindDetected: tailwind.detected,
     }))
   } else {
+    console.log(projectRootHeader(configPath))
     if (!tailwind.detected) {
       console.log('note: Tailwind not detected — className channels sit out (their token vocabulary '
         + 'would be a guess); the style-attribute channel below reads real values')
@@ -253,6 +255,15 @@ export function runProjectStateGeometry(searchFrom: string, json = false): boole
   return false
 }
 
+// The tsconfig walk-up can land on a PARENT project when the working directory has no config of
+// its own — a scan that would silently report the parent's findings labeled as the subproject.
+// The resolved root is part of the report's identity, so both output formats echo it.
+function projectRootHeader(configPath: string): string {
+  const root = dirname(configPath)
+  const fromParent = relative(process.cwd(), root) !== ''
+  return `project: ${root}${fromParent ? ' — resolved upward from the working directory' : ''}`
+}
+
 export function runFileStateGeometry(file: string, json = false): boolean {
   const absoluteFile = resolve(file)
   if (!existsSync(absoluteFile)) throw new Error(`File not found: ${absoluteFile}`)
@@ -260,8 +271,8 @@ export function runFileStateGeometry(file: string, json = false): boolean {
   if (configPath == null) {
     const audits = [auditStateGeometrySource(absoluteFile, readFileSync(absoluteFile, 'utf8'))]
     console.log(json
-      ? JSON.stringify(stateGeometryReportData(audits, [], process.cwd()))
-      : formatStateGeometryReport(audits))
+      ? JSON.stringify({projectRoot: null, ...stateGeometryReportData(audits, [], process.cwd())})
+      : `project: none — no tsconfig.json found; scanning the file alone\n${formatStateGeometryReport(audits)}`)
     return false
   }
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
@@ -281,10 +292,12 @@ export function runFileStateGeometry(file: string, json = false): boolean {
   const instanceFindings = compareComponentInstances(audit.instances)
   if (json) {
     console.log(JSON.stringify({
+      projectRoot: dirname(configPath),
       ...stateGeometryReportData([audit], instanceFindings, dirname(configPath)),
       tailwindDetected: tailwind.detected,
     }))
   } else {
+    console.log(projectRootHeader(configPath))
     if (!tailwind.detected) {
       console.log('note: Tailwind not detected — className channels sit out (their token vocabulary '
         + 'would be a guess); the style-attribute channel below reads real values')
