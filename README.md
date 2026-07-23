@@ -22,11 +22,14 @@ There's no API =). Your TypeScript code provides enough information for Freerang
 ## Commands
 
 - `fr`: print project errors and warnings
+- `fr --all`: run every project check below in one pass, ending in a manifest that names each check as passed, failed, or skipped-with-reason — a check that did not run is a visible row, never a silent absence
 - `fr --audit`: print every function's contracts, plus refactor suggestions to help Freerange analyze better. Great for agents
 - `fr --spacing`: scan JSX for spacing-ownership findings — elements that mix inline-style positioning with class-based spacing
-- `fr --layout`: check source-linked intrinsic block-size contracts from `freerange.layout.json`
+- `fr --state-geometry`: scan conditional classNames and style attributes for geometry that varies with state (`--json` for structured output)
+- `fr --breakpoints`: derive the viewport thresholds the class tokens declare (`--json` for structured output)
+- `fr --layout`: check source-linked intrinsic block-size contracts and line-box containment claims from `freerange.layout.json`
 
-Pass a file path to `fr`, `fr --audit`, or `fr --spacing` to filter down to that file's report. `fr --layout` instead accepts an optional layout-config path and otherwise searches upward for `freerange.layout.json`.
+Pass a file path to `fr`, `fr --audit`, `fr --spacing`, or `fr --state-geometry` to filter down to that file's report. `fr --layout` instead accepts an optional layout-config path and otherwise searches upward for `freerange.layout.json`. `fr --help` prints this menu.
 
 `fr` directly uses TypeScript under the hood, so it naturally respects your `tsconfig`. We output TS errors before our analysis, so technically, you can swap out your explicit `tsc --noEmit` command for `fr` and nothing changes!
 
@@ -227,6 +230,49 @@ The source element carries the marker literally:
 The analyzer follows immutable numeric and string constants through same-project imports, evaluates finite arithmetic, and combines explicit inline sizes with a bounded Tailwind subset for height, block padding and margin, border width, flex direction, positioning, visibility, and box sizing. Every report prints its assumptions: Tailwind numeric lengths and breakpoints use their defaults, Tailwind's `border-box` preflight applies, and CSS rules outside the model do not change block geometry. Fixed-height wrappers bound opaque descendants; absolutely positioned or hidden children do not add in-flow pressure. Default responsive variants are evaluated against every configured viewport width. Conditional class, style, and JSX alternatives are checked separately, but a branch contributes a definite failure witness only when its reachability can be proven. For example, a reachable 32px control inside a row with 20px of padding and a 2px outer border reports a definite 54px requirement against a 52px contract, with the condition and contributing source lines.
 
 This is deliberately not a general CSS layout engine. Component internals, text wrapping, runtime CSS variants, responsive geometry that differs across the configured viewports, percentage sizes, negative block margins, multi-line flex layout, stored runtime boolean aliases, and expressions outside the supported subset make the result `unknown` unless an explicit boundary already proves the relevant size. Branch reachability rests on the file's declared types, so a marked source file containing `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, or `eval` reports unknown coverage — the same file-wide rule the numeric analyzer applies. A type assertion never answers a reachability question: `(mode as 'compact') === 'compact'` keeps both branches under consideration, while a cast around a literal, e.g. `52 as number`, still evaluates normally. Non-replaced inline elements need an explicit block-capable display before their height can be checked. A hidden ancestor, a size-constrained flex-column parent, or a flex-row parent stretching an auto-height target also makes the marked target unknown because the local box arithmetic cannot prove that the target has, or keeps, its own principal box. External stylesheets are not read, which is why their absence from the box calculation is stated as an assumption rather than silently presented as proof. A definite lower-bound violation still reports as an error even when unrelated content is opaque; Freerange does not hide known bad arithmetic behind incomplete coverage. Final browser geometry and cross-component alignment belong to a separate concrete layout system.
+
+## Line-box containment claims
+
+The second claim type `freerange.layout.json` supports, born from a field report of three real
+bugs that all reduced to one sentence: **an inline-level box whose margin box exceeds its
+formatting context's strut grows the line whenever it is present** — a pill capsule taller than
+the prose line, an exact-strut caret span under `vertical-align: middle`, a `margin-bottom` on an
+atomic inline. Every input was a compile-time constant, so the claim is provable without a
+browser: prove the box fits the strut, or mean the shift.
+
+```json
+{
+  "targets": [],
+  "constraints": [],
+  "lineBoxContainment": [
+    {
+      "name": "prompt pills fit the editable's line",
+      "context": ["prompt-editable"],
+      "inline": ["pill", "pill--prompt-bar"],
+      "assume": {"contextFontSizePx": 15}
+    }
+  ]
+}
+```
+
+`context` and `inline` are the class lists carried by the text context and the inline-level box.
+Geometry resolves from the project's plain stylesheets: rules whose selector is exactly one class
+resolve; every other appearance of a class — pseudo-classes, combinators' subject compounds,
+conditional at-rules — shadows the specific properties it declares, so a `:focus` rule that only
+recolors blocks nothing while one that changes `line-height` makes the claim unknown with that
+reason. Pseudo-element rules style a generated box and never shadow. The same property declared
+for the same class in two stylesheets is a conflict (load order is unknowable statically), and a
+class whose geometry lives only in generated CSS — a bare Tailwind utility — resolves to an
+honest unknown naming the class. `assume.contextFontSizePx` declares an inherited font size the
+stylesheets do not state; it is echoed in the report as an assumption, never silently invented.
+
+The rule is metric-free and conservative. Strut = context font-size × line-height (numeric
+line-height inherits as a number and rescales; lengths inherit computed). The box presents
+`max(content line, min-height, height)` plus block padding, borders, and margins — atomic
+inlines participate in the line through their **margin** box. `top`/`bottom` alignment admits an
+edge-to-edge exact fit; `middle`/`baseline` demand strict clearance, because an equal box
+provably pushes descent past the strut. A tight `middle`/`baseline` fit passes with the note
+that font descent metrics are not modeled.
 
 ## Recommended TypeScript Config
 
