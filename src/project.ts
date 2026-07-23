@@ -6,6 +6,7 @@
 // formats, one file's slice.
 
 import {existsSync, readFileSync} from 'node:fs'
+import {findLayoutConfig, runProjectLayout} from './layout/project.ts'
 import {dirname, relative, resolve} from 'node:path'
 import * as ts from 'typescript'
 import {analyzeCheckedSource, type DetailedAnalysis} from './analyze.ts'
@@ -138,6 +139,50 @@ export function runProjectSpacing(searchFrom: string): boolean {
   const audits = graph.sources.map(source => auditProjectSpacingSource(source.sourceFile))
   console.log(formatSpacingReport(audits, spacingReportOptions(graph.entry.parsed.options['pretty'])))
   return false
+}
+
+// `fr --all`: every project check in one pass, ending in a manifest. The point of the manifest is
+// the doctrine point — a check that did not run is listed with its reason, never silently absent,
+// because "I ran all the checks" has already been said by someone who skipped one. Exit semantics
+// are each check's own: findings errors and a failing layout gate fail the pass; audit, spacing,
+// state-geometry, and breakpoints are informational here as everywhere.
+export function runProjectAll(searchFrom: string): boolean {
+  const banner = (title: string): void => console.log(`\n===== ${title} =====`)
+  const manifest: Array<{check: string; status: 'passed' | 'failed' | 'skipped'; note: string}> = []
+  // A check that throws becomes a failed row with its message, and the suite continues: the
+  // manifest's whole job is that no check ends up silently absent — crashes included.
+  const section = (check: string, title: string, note: string, body: () => boolean): void => {
+    banner(title)
+    try {
+      manifest.push({check, status: body() ? 'failed' : 'passed', note})
+    } catch (error) {
+      console.log(error instanceof Error ? error.message : String(error))
+      manifest.push({check, status: 'failed', note: `${note}; crashed`})
+    }
+  }
+
+  section('findings', 'findings', 'gating', () => runProjectFindings(searchFrom))
+  section('audit', 'numeric audit', 'informational; fails only on TypeScript errors',
+    () => runProjectAudit(searchFrom))
+  section('spacing', 'spacing ownership', 'advisory', () => runProjectSpacing(searchFrom))
+  section('state-geometry', 'state geometry', 'advisory', () => runProjectStateGeometry(searchFrom))
+  section('breakpoints', 'declared breakpoints', 'informational', () => runProjectBreakpoints(searchFrom))
+  const layoutConfig = findLayoutConfig(searchFrom)
+  if (layoutConfig == null) {
+    banner('layout contracts')
+    console.log('skipped: no freerange.layout.json found from here or any parent directory')
+    manifest.push({check: 'layout', status: 'skipped', note: 'no freerange.layout.json'})
+  } else {
+    section('layout', 'layout contracts', 'gating', () => runProjectLayout(searchFrom))
+  }
+
+  banner('suite manifest')
+  for (const entry of manifest) {
+    console.log(`${entry.status === 'failed' ? '✗' : entry.status === 'skipped' ? '−' : '✓'} ${entry.check} — ${entry.status} (${entry.note})`)
+  }
+  const ran = manifest.filter(entry => entry.status !== 'skipped').length
+  console.log(`${ran}/${manifest.length} checks ran; gating checks and crashes set the exit`)
+  return manifest.some(entry => entry.status === 'failed')
 }
 
 export function runProjectBreakpoints(searchFrom: string, json = false): boolean {
