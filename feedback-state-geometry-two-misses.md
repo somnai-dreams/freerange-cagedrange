@@ -116,3 +116,58 @@ one small app is decent evidence it carries weight. Also caught at runtime by a 
 state-transition diff (same-page capture before/after the interaction, diff at 0.25px
 tolerance, gate on moved/resized of pre-existing elements): `resized div#26 (block
 -0.63px)` pre-fix, clean post-fix.
+
+## Field notes from PR-battery runs (2026-07-24, three real PRs)
+
+1. **The component-instance registry conflates same-name components.** The tree under
+   review had three distinct `Pill` components (`ideas/Pill`, `GenInputBar/Pill`, a local
+   one in `SideBar.tsx`); the registry keys on the bare name and cross-compared their call
+   sites, producing 110 of a PR's 194 "new" findings — all false. The `'ambiguous'` marker
+   exists in the type but did not fire. Key the registry on resolved module path + name,
+   or actually mark same-name-different-file as ambiguous.
+2. **Instance-comparison anchors are unstable across trees, so instanceGeometry deltas are
+   unusable for PR review.** Base anchored `<Button>` comparisons on `confirmationModal.tsx`
+   (56 findings); the branch re-anchored on `modalBase.tsx` and emitted 302. Same
+   underlying instances, different anchor → every detail string differs → everything reads
+   "new". Anchor election needs to be deterministic under insertion (e.g. lexicographically
+   smallest file:line among instances), and the delta identity should compare instance
+   PAIRS, not anchor-relative strings (embedded `file:line` anchors also churn on
+   unrelated line shifts; we had to normalize `:\d+` away to get a usable delta).
+3. **tsconfig walk-up silently rescans the parent project.** Running the scan from a
+   subproject without its own tsconfig (`prototype/`) resolved the repo root's project and
+   reported 710 main-app findings labeled as the subproject. Echo the resolved project
+   root in the output header (like the Tailwind assumptions) so a mis-scoped scan is
+   visible at a glance.
+
+## Miss 3 (user-caught, 2026-07-24): conditional JSX subtrees with divergent intrinsic geometry
+
+`HoverMoodboard.control.tsx:236` (and the same pattern in the treatment arm):
+
+```jsx
+{isEditing ? (
+  <div className="pointer-events-auto w-full flex items-center">
+    <input className="… py-0.5 h-7 … text-sm … leading-tight" />   // 28px box
+    <Button className="size-7 …" />                                 // 28px box
+  </div>
+) : (
+  <div className="relative line-clamp-1 text-sm font-semibold leading-tight …">  // 14 × 1.25 = 17.5px
+    {profile.title}
+  </div>
+)}
+```
+
+Entering title-edit swaps a 17.5px text line for a 28px cluster inside an `h-12 min-h-fit`
+row — the row grows ~10px and displaces the card content. Every quantity is a Tailwind
+default token (`h-7`, `size-7`, `text-sm`, `leading-tight`): the comparison is decidable
+arithmetic, `shift`-severity, magnitude ~10.5px. The scan's 9 findings in this file all
+come from className/style conditionals; the element-level ternary never enters branch
+extraction, so the largest state shift in the file is the one it can't see.
+
+Suggested extension: when a JSX expression container holds a conditional whose branches
+are elements (ternary or `&&`), extract each branch's ROOT className/style geometry and
+compare them exactly like className branches (same families, same severity rules; a
+fragment/multi-root branch can fall to coverage). This is the static-evaluator's
+conditional-child model (`{showExtra && <button className="h-8"/>}` already rejects
+intrinsicBlockSize contracts) imported into the scan's per-site claim — the machinery
+half-exists, it just isn't wired to this syntax form. Note the discriminant liveness rule
+already handles the rest (`isEditing` is a useState — live while mounted → shift).
