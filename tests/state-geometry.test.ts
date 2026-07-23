@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'bun:test'
-import {auditStateGeometryFile, auditStateGeometrySource, breakpointReportData, classifyToken, collectBreakpoints, collectComponentTemplates, collectPropLiterals, compareComponentInstances, formatBreakpointReport, stateGeometryReportData, type BreakpointUsage, type ComponentRegistry, type PropLiteralIndex} from '../src/spacing/state-geometry.ts'
+import {auditStateGeometryFile, auditStateGeometrySource, breakpointReportData, classifyToken, collectBreakpoints, collectComponentTemplates, collectPropLiterals, compareComponentInstances, formatBreakpointReport, formatStateGeometryReport, stateGeometryReportData, type BreakpointUsage, type ComponentRegistry, type PropLiteralIndex} from '../src/spacing/state-geometry.ts'
 import * as ts from 'typescript'
 
 const audit = (jsx: string) => auditStateGeometrySource('State.tsx', `
@@ -486,10 +486,7 @@ export function Pill({className}: {className: string}) {
   return <div className={\`px-2 border \${className}\`} />
 }
 export function Ideas() {
-  return <>
-    <Pill className="mt-1" />
-    <Pill className="mt-1" />
-  </>
+  return <Pill className="mt-1" />
 }
 `
 
@@ -554,10 +551,7 @@ export default function Pill({className}: {className: string}) {
   return <div className={\`px-2 border \${className}\`} />
 }
 export function Ideas() {
-  return <>
-    <Pill className="mt-1" />
-    <Pill className="mt-1" />
-  </>
+  return <Pill className="mt-1" />
 }
 `],
       ['Bar.tsx', `
@@ -569,6 +563,60 @@ export function Bar() {
     ], resolve)
     expect(defaulted.instanceFindings).toHaveLength(1)
     expect(defaulted.instanceFindings[0]!.detail).toContain('<Pill> instances disagree')
+  })
+
+  test('anchor election is deterministic and structured, not collection-ordered', () => {
+    const declaring: [string, string] = ['z.tsx', `
+export function Pill({className}: {className: string}) {
+  return <div className={\`px-2 border \${className}\`} />
+}
+export function Z() {
+  return <Pill className="mt-1" />
+}
+`]
+    const using: [string, string] = ['a.tsx', `
+import {Pill} from './Pill'
+export function A() {
+  return <Pill className="mt-4" />
+}
+`]
+    const resolve = (specifier: string) => specifier === './Pill' ? 'z.tsx' : null
+    const forward = auditProject([declaring, using], resolve)
+    const reversed = auditProject([using, declaring], resolve)
+    for (const {instanceFindings} of [forward, reversed]) {
+      // a.tsx sorts before z.tsx, so it anchors regardless of which file was collected first;
+      // the finding lands on the divergent z.tsx site and carries the pair as data.
+      expect(instanceFindings).toHaveLength(1)
+      expect(instanceFindings[0]!.file).toBe('z.tsx')
+      expect(instanceFindings[0]!.anchor?.file).toBe('a.tsx')
+      expect(instanceFindings[0]!.detail).not.toContain('a.tsx')
+    }
+    expect(forward.instanceFindings).toEqual(reversed.instanceFindings)
+    // The text report still names the anchor for humans — composed from the structured pair.
+    expect(formatStateGeometryReport(forward.audits, forward.instanceFindings)).toContain('(vs a.tsx:')
+  })
+
+  test('report data relativizes instance anchors', () => {
+    const {audits, instanceFindings} = auditProject([
+      ['/repo/src/z.tsx', `
+export function Pill({className}: {className: string}) {
+  return <div className={\`px-2 border \${className}\`} />
+}
+export function Z() {
+  return <Pill className="mt-1" />
+}
+`],
+      ['/repo/src/a.tsx', `
+import {Pill} from './Pill'
+export function A() {
+  return <Pill className="mt-4" />
+}
+`],
+    ], specifier => specifier === './Pill' ? '/repo/src/z.tsx' : null)
+    const data = stateGeometryReportData(audits, instanceFindings, '/repo')
+    const instance = data.findings.find(finding => finding.kind === 'instanceGeometry')
+    expect(instance?.file).toBe('src/z.tsx')
+    expect(instance?.anchor?.file).toBe('src/a.tsx')
   })
 
   test('a name declared twice in one module is ambiguous and makes no claim', () => {

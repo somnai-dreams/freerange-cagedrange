@@ -36,6 +36,13 @@ export type StateGeometryFinding = {
   // bounded analysis cannot decide.
   severity: 'shift' | 'motion' | 'unclear' | 'config'
   evidence: string
+  // instanceGeometry only: the anchor call site this divergent site was compared against —
+  // deterministically the lexicographically smallest file, then earliest line, among the
+  // component's instances, so adding a call site elsewhere cannot re-anchor the group.
+  // Structured so cross-tree delta tooling keys on the site pair instead of parsing (and
+  // churning on) file:line text embedded in the detail; the text report renders it after the
+  // detail.
+  anchor?: {file: string; line: number}
 }
 
 export type StateGeometryCoverage = {
@@ -425,21 +432,28 @@ export function compareComponentInstances(instances: ComponentInstance[]): State
   for (const [template, list] of byTemplate) {
     const component = list[0]!.component
     const ownGeometry = template.ownGeometry
-    for (let index = 1; index < list.length; index++) {
-      for (const difference of compareTokensAcrossIntervals(list[0]!.tokens, list[index]!.tokens)) {
+    // Anchor election is deterministic under insertion: the lexicographically smallest file,
+    // then the earliest line, anchors the group — collection order (which churns whenever the
+    // instance set changes across trees) never decides what every other call site compares
+    // against.
+    const sorted = [...list].sort((left, right) =>
+      left.file < right.file ? -1 : left.file > right.file ? 1 : left.line - right.line)
+    const anchor = sorted[0]!
+    for (let index = 1; index < sorted.length; index++) {
+      for (const difference of compareTokensAcrossIntervals(anchor.tokens, sorted[index]!.tokens)) {
         const overridesTemplate = difference.keys.some(key => ownGeometry.has(key))
         findings.push({
-          file: list[index]!.file,
-          line: list[index]!.line,
+          file: sorted[index]!.file,
+          line: sorted[index]!.line,
           kind: 'instanceGeometry',
           severity: overridesTemplate ? 'shift' : 'config',
           evidence: overridesTemplate
             ? 'a call site overrides geometry the component itself declares'
             : 'the difference is caller-owned sizing the template never declares',
           magnitudePx: difference.magnitudePx,
-          detail: `<${component}> instances disagree${difference.label == null ? '' : ` ${difference.label}`} `
-            + `(vs ${list[0]!.file}:${list[0]!.line}): `
+          detail: `<${component}> instances disagree${difference.label == null ? '' : ` ${difference.label}`}: `
             + difference.detail.replace('state shifts layout: ', ''),
+          anchor: {file: anchor.file, line: anchor.line},
         })
       }
     }
@@ -1411,9 +1425,9 @@ function trim(value: number): string {
 
 
 // The structured report: everything the text report says, as data — for tooling that diffs scans
-// across worktrees (a PR battery) instead of parsing prose. Files and any paths embedded in
-// instance details are relativized against the scan root so two checkouts of the same tree
-// produce comparable findings.
+// across worktrees (a PR battery) instead of parsing prose. Finding files and instance anchor
+// files are relativized against the scan root so two checkouts of the same tree produce
+// comparable findings.
 export type StateGeometryReportData = {
   findings: StateGeometryFinding[]
   coverage: number
@@ -1428,7 +1442,12 @@ export function stateGeometryReportData(
   const prefix = rootDirectory == null ? null : rootDirectory.endsWith('/') ? rootDirectory : `${rootDirectory}/`
   const relativize = (text: string): string => prefix == null ? text : text.replaceAll(prefix, '')
   const findings = sortFindings([...audits.flatMap(audit => audit.findings), ...instanceFindings])
-    .map(finding => ({...finding, file: relativize(finding.file), detail: relativize(finding.detail)}))
+    .map(finding => ({
+      ...finding,
+      file: relativize(finding.file),
+      detail: relativize(finding.detail),
+      ...(finding.anchor == null ? {} : {anchor: {file: relativize(finding.anchor.file), line: finding.anchor.line}}),
+    }))
   const tally = (severity: StateGeometryFinding['severity']): number =>
     findings.filter(finding => finding.severity === severity).length
   return {
@@ -1459,7 +1478,9 @@ export function formatStateGeometryReport(
         ? 'state variant changes geometry'
         : 'component instances disagree on geometry'
   const lines = data.findings.map(finding =>
-    `[${finding.severity}] ${finding.file}:${finding.line} ${kindText(finding)}: ${finding.detail} (${finding.evidence})`)
+    `[${finding.severity}] ${finding.file}:${finding.line} ${kindText(finding)}: ${finding.detail}`
+    + `${finding.anchor == null ? '' : ` (vs ${finding.anchor.file}:${finding.anchor.line})`}`
+    + ` (${finding.evidence})`)
   lines.push(
     `state geometry: ${data.findings.length} finding${data.findings.length === 1 ? '' : 's'} `
     + `(${data.counts.shift} shift, ${data.counts.motion} motion, ${data.counts.unclear} unclear, ${data.counts.config} config); `
