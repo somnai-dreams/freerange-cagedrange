@@ -11,9 +11,16 @@ import {runFileAudit, runFileFindings, runFileSpacing, runFileStateGeometry, run
 import {runProjectLayout} from './src/layout/project.ts'
 import {formatTypeScriptDiagnostics, TypeScriptDiagnosticsError} from './src/typescript/diagnostics.ts'
 
-const arguments_ = process.argv.slice(2)
+const rawArguments = process.argv.slice(2)
+// --json is recognized by the scans that tooling diffs across worktrees; everywhere else it is a
+// loud error rather than a silently ignored flag.
+const json = rawArguments.includes('--json')
+const arguments_ = rawArguments.filter(argument => argument !== '--json')
 try {
   let failed: boolean
+  if (json && arguments_[0] !== '--state-geometry' && arguments_[0] !== '--breakpoints') {
+    throw new Error('--json is supported for --state-geometry and --breakpoints only.')
+  }
   if (arguments_[0] === '--audit') {
     if (arguments_.length > 2) throw new Error('Usage: fr --audit [file]')
     failed = arguments_.length === 1
@@ -25,13 +32,13 @@ try {
       ? runProjectSpacing(process.cwd())
       : runFileSpacing(arguments_[1]!)
   } else if (arguments_[0] === '--state-geometry') {
-    if (arguments_.length > 2) throw new Error('Usage: fr --state-geometry [file]')
+    if (arguments_.length > 2) throw new Error('Usage: fr --state-geometry [file] [--json]')
     failed = arguments_.length === 1
-      ? runProjectStateGeometry(process.cwd())
-      : runFileStateGeometry(arguments_[1]!)
+      ? runProjectStateGeometry(process.cwd(), json)
+      : runFileStateGeometry(arguments_[1]!, json)
   } else if (arguments_[0] === '--breakpoints') {
-    if (arguments_.length > 1) throw new Error('Usage: fr --breakpoints')
-    failed = runProjectBreakpoints(process.cwd())
+    if (arguments_.length > 1) throw new Error('Usage: fr --breakpoints [--json]')
+    failed = runProjectBreakpoints(process.cwd(), json)
   } else if (arguments_[0] === '--layout') {
     if (arguments_.length > 2) throw new Error('Usage: fr --layout [config]')
     failed = runProjectLayout(process.cwd(), arguments_[1])

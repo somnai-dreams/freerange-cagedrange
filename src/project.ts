@@ -6,7 +6,7 @@
 // formats, one file's slice.
 
 import {existsSync, readFileSync} from 'node:fs'
-import {relative, resolve} from 'node:path'
+import {dirname, relative, resolve} from 'node:path'
 import * as ts from 'typescript'
 import {analyzeCheckedSource, type DetailedAnalysis} from './analyze.ts'
 import {createFileAudit, formatFileAuditUnit} from './audit.ts'
@@ -26,8 +26,7 @@ import {
   formatStateGeometryReport,
   type BreakpointUsage,
   type ComponentRegistry,
-  type PropLiteralIndex,
-} from './spacing/state-geometry.ts'
+  type PropLiteralIndex, stateGeometryReportData, breakpointReportData,} from './spacing/state-geometry.ts'
 import type {SpacingFileAudit, SpacingReportOptions} from './spacing/model.ts'
 import {formatSpacingReport} from './spacing/report.ts'
 import {checkFile} from './typescript/check.ts'
@@ -141,7 +140,7 @@ export function runProjectSpacing(searchFrom: string): boolean {
   return false
 }
 
-export function runProjectBreakpoints(searchFrom: string): boolean {
+export function runProjectBreakpoints(searchFrom: string, json = false): boolean {
   const configPath = findTypeScriptConfig(searchFrom)
   if (configPath == null) {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
@@ -149,11 +148,11 @@ export function runProjectBreakpoints(searchFrom: string): boolean {
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   const usage = new Map<number, BreakpointUsage>()
   for (const source of graph.sources) collectBreakpoints(source.sourceFile, usage)
-  console.log(formatBreakpointReport(usage))
+  console.log(json ? JSON.stringify(breakpointReportData(usage)) : formatBreakpointReport(usage))
   return false
 }
 
-export function runProjectStateGeometry(searchFrom: string): boolean {
+export function runProjectStateGeometry(searchFrom: string, json = false): boolean {
   const configPath = findTypeScriptConfig(searchFrom)
   if (configPath == null) {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
@@ -169,16 +168,21 @@ export function runProjectStateGeometry(searchFrom: string): boolean {
   }
   const audits = graph.sources.map(source => auditStateGeometryFile(source.sourceFile, registry, propIndex))
   const instanceFindings = compareComponentInstances(audits.flatMap(audit => audit.instances), registry)
-  console.log(formatStateGeometryReport(audits, instanceFindings))
+  console.log(json
+    ? JSON.stringify(stateGeometryReportData(audits, instanceFindings, dirname(configPath)))
+    : formatStateGeometryReport(audits, instanceFindings))
   return false
 }
 
-export function runFileStateGeometry(file: string): boolean {
+export function runFileStateGeometry(file: string, json = false): boolean {
   const absoluteFile = resolve(file)
   if (!existsSync(absoluteFile)) throw new Error(`File not found: ${absoluteFile}`)
   const configPath = findTypeScriptConfig(process.cwd())
   if (configPath == null) {
-    console.log(formatStateGeometryReport([auditStateGeometrySource(absoluteFile, readFileSync(absoluteFile, 'utf8'))]))
+    const audits = [auditStateGeometrySource(absoluteFile, readFileSync(absoluteFile, 'utf8'))]
+    console.log(json
+      ? JSON.stringify(stateGeometryReportData(audits, [], process.cwd()))
+      : formatStateGeometryReport(audits))
     return false
   }
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
@@ -193,7 +197,10 @@ export function runFileStateGeometry(file: string): boolean {
     collectPropLiterals(projectSource.sourceFile, propIndex)
   }
   const audit = auditStateGeometryFile(source.sourceFile, registry, propIndex)
-  console.log(formatStateGeometryReport([audit], compareComponentInstances(audit.instances, registry)))
+  const instanceFindings = compareComponentInstances(audit.instances, registry)
+  console.log(json
+    ? JSON.stringify(stateGeometryReportData([audit], instanceFindings, dirname(configPath)))
+    : formatStateGeometryReport([audit], instanceFindings))
   return false
 }
 

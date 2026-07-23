@@ -566,12 +566,7 @@ function auditClassAttribute(
         file: audit.file,
         line,
         kind: 'branchGeometry',
-        // Transform-only and overlay-bounded differences are bounded to paint motion whatever the
-        // discriminant turns out to be, so they outrank nothing but config even when mobility is
-        // unresolved.
-        severity: transformOnlyFamilies(difference.keys) || overlay
-          ? mobility === 'immobile' ? 'config' : 'motion'
-          : mobility === 'mobile' ? 'shift' : mobility === 'immobile' ? 'config' : 'unclear',
+        severity: liveSeverity(mobility, transformOnlyFamilies(difference.keys) || overlay),
         evidence: clauses.join('; '),
         magnitudePx: difference.magnitudePx,
         detail: difference.label == null
@@ -617,7 +612,7 @@ function auditClassAttribute(
         file: audit.file,
         line,
         kind: 'variantGeometry',
-        severity: transformOnlyFamilies([parsed.family]) || overlay ? 'motion' : 'shift',
+        severity: liveSeverity('mobile', transformOnlyFamilies([parsed.family]) || overlay),
         evidence: clauses.join('; '),
         magnitudePx,
         detail: base == null
@@ -632,6 +627,16 @@ function auditClassAttribute(
 // difference confined to them is motion, not displacement. Negative-value spellings keep the
 // leading dash in the family name.
 const transformFamilyPattern = /^-?(translate(-[xyz])?|scale(-[xy])?|rotate(-[xyz])?|skew(-[xy])?)$/
+
+// One rule for both live finding sites: a sibling-safe (bounded) difference is motion however
+// mobile its discriminant, an immobile discriminant is configuration either way, and only an
+// unbounded difference distinguishes live shift from unresolved. Pseudo-state variants fire on
+// mounted elements, so the variant site passes 'mobile'.
+function liveSeverity(mobility: Mobility, bounded: boolean): StateGeometryFinding['severity'] {
+  if (mobility === 'immobile') return 'config'
+  if (bounded) return 'motion'
+  return mobility === 'mobile' ? 'shift' : 'unclear'
+}
 
 function transformOnlyFamilies(families: Iterable<string>): boolean {
   let any = false
@@ -1147,30 +1152,79 @@ export function classifyToken(rawToken: string): TokenClassification {
   return {kind: 'unknown', family: root, value, variants, important}
 }
 
+// The structured report: everything the text report says, as data — for tooling that diffs scans
+// across worktrees (a PR battery) instead of parsing prose. Files and any paths embedded in
+// instance details are relativized against the scan root so two checkouts of the same tree
+// produce comparable findings.
+export type StateGeometryReportData = {
+  findings: StateGeometryFinding[]
+  coverage: number
+  counts: {shift: number; motion: number; unclear: number; config: number}
+}
+
+export function stateGeometryReportData(
+  audits: StateGeometryFileAudit[],
+  instanceFindings: StateGeometryFinding[] = [],
+  rootDirectory?: string,
+): StateGeometryReportData {
+  const prefix = rootDirectory == null ? null : rootDirectory.endsWith('/') ? rootDirectory : `${rootDirectory}/`
+  const relativize = (text: string): string => prefix == null ? text : text.replaceAll(prefix, '')
+  const findings = sortFindings([...audits.flatMap(audit => audit.findings), ...instanceFindings])
+    .map(finding => ({...finding, file: relativize(finding.file), detail: relativize(finding.detail)}))
+  const tally = (severity: StateGeometryFinding['severity']): number =>
+    findings.filter(finding => finding.severity === severity).length
+  return {
+    findings,
+    coverage: audits.reduce((total, audit) => total + audit.coverage.length, 0),
+    counts: {shift: tally('shift'), motion: tally('motion'), unclear: tally('unclear'), config: tally('config')},
+  }
+}
+
+// Live shifts first, then unresolved, then paint-only motion, then configuration; largest
+// movement on top within a tier.
+function sortFindings(findings: StateGeometryFinding[]): StateGeometryFinding[] {
+  const rank = (finding: StateGeometryFinding): number =>
+    finding.severity === 'shift' ? 3 : finding.severity === 'unclear' ? 2 : finding.severity === 'motion' ? 1 : 0
+  return [...findings].sort((left, right) =>
+    rank(right) - rank(left) || (right.magnitudePx ?? -1) - (left.magnitudePx ?? -1))
+}
+
 export function formatStateGeometryReport(
   audits: StateGeometryFileAudit[],
   instanceFindings: StateGeometryFinding[] = [],
 ): string {
-  const all = [...audits.flatMap(audit => audit.findings), ...instanceFindings]
-  // Live shifts first, then unresolved, then paint-only motion, then configuration; largest
-  // movement on top within a tier.
-  const rank = (finding: StateGeometryFinding): number =>
-    finding.severity === 'shift' ? 3 : finding.severity === 'unclear' ? 2 : finding.severity === 'motion' ? 1 : 0
-  all.sort((left, right) => rank(right) - rank(left) || (right.magnitudePx ?? -1) - (left.magnitudePx ?? -1))
+  const data = stateGeometryReportData(audits, instanceFindings)
   const kindText = (finding: StateGeometryFinding): string =>
     finding.kind === 'branchGeometry'
       ? 'state changes geometry'
       : finding.kind === 'variantGeometry'
         ? 'state variant changes geometry'
         : 'component instances disagree on geometry'
-  const lines = all.map(finding =>
+  const lines = data.findings.map(finding =>
     `[${finding.severity}] ${finding.file}:${finding.line} ${kindText(finding)}: ${finding.detail} (${finding.evidence})`)
-  const coverage = audits.reduce((total, audit) => total + audit.coverage.length, 0)
-  const tally = (severity: StateGeometryFinding['severity']): number =>
-    all.filter(finding => finding.severity === severity).length
   lines.push(
-    `state geometry: ${all.length} finding${all.length === 1 ? '' : 's'} `
-    + `(${tally('shift')} shift, ${tally('motion')} motion, ${tally('unclear')} unclear, ${tally('config')} config); `
-    + `${coverage} expression${coverage === 1 ? '' : 's'} partly dynamic`)
+    `state geometry: ${data.findings.length} finding${data.findings.length === 1 ? '' : 's'} `
+    + `(${data.counts.shift} shift, ${data.counts.motion} motion, ${data.counts.unclear} unclear, ${data.counts.config} config); `
+    + `${data.coverage} expression${data.coverage === 1 ? '' : 's'} partly dynamic`)
   return lines.join('\n')
+}
+
+// Structured breakpoint report for the same tooling audience.
+export type BreakpointReportData = {
+  breakpoints: Array<{thresholdPx: number; variants: Array<{variant: string; count: number}>}>
+  seams: number[]
+}
+
+export function breakpointReportData(usage: Map<number, BreakpointUsage>): BreakpointReportData {
+  const thresholds = [...usage.values()].sort((left, right) => left.thresholdPx - right.thresholdPx)
+  return {
+    breakpoints: thresholds.map(entry => ({
+      thresholdPx: entry.thresholdPx,
+      variants: [...entry.variants.entries()]
+        .sort((left, right) => right[1] - left[1])
+        .map(([variant, count]) => ({variant, count})),
+    })),
+    seams: [...new Set(thresholds.flatMap(entry => [entry.thresholdPx - 1, entry.thresholdPx]))]
+      .sort((left, right) => left - right),
+  }
 }

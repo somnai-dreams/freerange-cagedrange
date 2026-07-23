@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'bun:test'
-import {auditStateGeometrySource, classifyToken, collectBreakpoints, formatBreakpointReport, type BreakpointUsage} from '../src/spacing/state-geometry.ts'
+import {auditStateGeometrySource, breakpointReportData, classifyToken, collectBreakpoints, formatBreakpointReport, stateGeometryReportData, type BreakpointUsage} from '../src/spacing/state-geometry.ts'
 import * as ts from 'typescript'
 
 const audit = (jsx: string) => auditStateGeometrySource('State.tsx', `
@@ -7,6 +7,39 @@ export function Component({active}: {active: boolean}) {
   return ${jsx}
 }
 `)
+
+describe('structured report data', () => {
+  test('relativizes paths, orders by tier, and tallies severities', () => {
+    const audit = auditStateGeometrySource('/repo/src/State.tsx', `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div>
+    <span className={open ? 'border p-2' : 'p-2'} />
+    <span className="translate-x-14 group-hover:translate-x-0" />
+  </div>
+}
+`)
+    const data = stateGeometryReportData([audit], [], '/repo')
+    expect(data.findings.map(finding => finding.file)).toEqual(['src/State.tsx', 'src/State.tsx'])
+    expect(data.findings[0]!.severity).toBe('shift')
+    expect(data.findings[1]!.severity).toBe('motion')
+    expect(data.counts).toEqual({shift: 1, motion: 1, unclear: 0, config: 0})
+    expect(data.coverage).toBe(0)
+  })
+
+  test('breakpoint data mirrors the text report', () => {
+    const usage = new Map<number, BreakpointUsage>()
+    usage.set(768, {thresholdPx: 768, variants: new Map([['md', 3]])})
+    usage.set(640, {thresholdPx: 640, variants: new Map([['sm', 5], ['max-sm', 1]])})
+    expect(breakpointReportData(usage)).toEqual({
+      breakpoints: [
+        {thresholdPx: 640, variants: [{variant: 'sm', count: 5}, {variant: 'max-sm', count: 1}]},
+        {thresholdPx: 768, variants: [{variant: 'md', count: 3}]},
+      ],
+      seams: [639, 640, 767, 768],
+    })
+  })
+})
 
 describe('state-variant geometry scan', () => {
   test('a conditional border width is a finding; a reserved border varying only in color is clean', () => {
