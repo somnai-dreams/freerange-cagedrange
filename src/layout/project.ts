@@ -35,6 +35,7 @@ function loadLayoutProject(searchFrom: string, configuredFile?: string): {config
 
 function staticLayoutFailed(audit: StaticLayoutAudit): boolean {
   return audit.checks.some(check => check.kind !== 'pass')
+    || audit.lineBoxChecks.some(check => check.kind !== 'pass')
 }
 
 export function findLayoutConfig(searchFrom: string): string | null {

@@ -15,6 +15,7 @@ const suite: StaticLayoutSuite = {
     tolerancePx: 0.25,
     viewportWidths: [390, 1440],
   }],
+  lineBoxContainment: [],
 }
 
 describe('static layout suite parsing', () => {

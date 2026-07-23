@@ -1,3 +1,4 @@
+import {pixels as lineBoxPixels, type LineBoxCheck} from './linebox.ts'
 import type {StaticLayoutAudit, StaticLayoutCheck, StaticLayoutUnknownReason} from './model.ts'
 
 export function formatStaticLayoutReport(audit: StaticLayoutAudit): string {
@@ -16,7 +17,37 @@ export function formatStaticLayoutReport(audit: StaticLayoutAudit): string {
     `static layout contracts: ${audit.checks.length - failures.length - unknown.length}/${audit.checks.length} passed; `
       + `${failures.length} failed; ${unknown.length} unknown`,
   )
+  if (audit.lineBoxChecks.length > 0) {
+    lines.push('Line-box containment:')
+    for (const check of audit.lineBoxChecks) lines.push(...formatLineBoxCheck(check))
+    const failed = audit.lineBoxChecks.filter(check => check.kind === 'fail').length
+    const unresolved = audit.lineBoxChecks.filter(check => check.kind === 'unknown').length
+    lines.push(
+      `line-box containment: ${audit.lineBoxChecks.length - failed - unresolved}/${audit.lineBoxChecks.length} passed; `
+        + `${failed} failed; ${unresolved} unknown`,
+    )
+  }
   return lines.join('\n')
+}
+
+function formatLineBoxCheck(check: LineBoxCheck): string[] {
+  switch (check.kind) {
+    case 'pass': return [
+      `  ${check.claim}: passed [line-box-containment] — box ${lineBoxPixels(check.boxPx)} fits strut `
+        + `${lineBoxPixels(check.strutPx)} under vertical-align ${check.verticalAlign}`
+        + `${check.note == null ? '' : ` (${check.note})`}`,
+    ]
+    case 'unknown': return [`  ${check.claim}: unknown [line-box-containment] — ${check.reason}`]
+    case 'fail': {
+      const lines = [
+        `  ${check.claim}: error [line-box-containment]: the inline box presents `
+          + `${lineBoxPixels(check.boxPx)} against a ${lineBoxPixels(check.strutPx)} strut under `
+          + `vertical-align ${check.verticalAlign} — the line grows whenever it is present`,
+      ]
+      for (const contribution of check.contributions) lines.push(`    ${contribution}`)
+      return lines
+    }
+  }
 }
 
 function formatStaticCheck(check: StaticLayoutCheck): string[] {

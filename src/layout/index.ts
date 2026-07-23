@@ -17,6 +17,10 @@ export {
 } from './algebra.ts'
 export {parseStaticLayoutSuite} from './config.ts'
 export {proveLayoutAlignment} from './constraint.ts'
+export {resolveCssClasses} from './css.ts'
+export type {CssClassIndex, CssDeclaration} from './css.ts'
+export {checkLineBoxContainment} from './linebox.ts'
+export type {LineBoxCheck, LineBoxContainmentClaim} from './linebox.ts'
 export {formatStaticLayoutReport} from './report.ts'
 export {runStaticLayoutSuite} from './static.ts'
 export type {

@@ -1,3 +1,5 @@
+import type {LineBoxCheck, LineBoxContainmentClaim} from './linebox.ts'
+
 export type StaticLayoutSourceTarget = {
   kind: 'jsx'
   file: string
@@ -21,6 +23,7 @@ export type StaticLayoutConstraint = {
 export type StaticLayoutSuite = {
   targets: StaticLayoutTarget[]
   constraints: StaticLayoutConstraint[]
+  lineBoxContainment: LineBoxContainmentClaim[]
 }
 
 export type StaticLayoutEvidence = {
@@ -71,4 +74,5 @@ export type StaticLayoutCheck =
 
 export type StaticLayoutAudit = {
   checks: StaticLayoutCheck[]
+  lineBoxChecks: LineBoxCheck[]
 }

@@ -20,6 +20,8 @@ import {
   type LayoutExpression,
   type LayoutExpressionRange,
 } from './algebra.ts'
+import {resolveCssClasses} from './css.ts'
+import {checkLineBoxContainment, type LineBoxCheck} from './linebox.ts'
 import type {
   StaticLayoutAudit,
   StaticLayoutCheck,
@@ -70,17 +72,20 @@ type BlockFacts = {
 type StyleAlternative = Map<string, ts.Expression>
 
 export function runStaticLayoutSuite(suite: StaticLayoutSuite, configDirectory: string): StaticLayoutAudit {
-  if (suite.constraints.length === 0) return {checks: []}
+  // Line-box claims read stylesheets, not the TypeScript project, so they run either way.
+  const lineBoxChecks = runLineBoxClaims(suite, configDirectory)
+  if (suite.constraints.length === 0) return {checks: [], lineBoxChecks}
   const configPath = findTypeScriptConfig(configDirectory)
   if (configPath == null) {
     return {checks: suite.constraints.map(constraint => unknownCheck(
       constraint,
       targetForConstraint(suite, constraint),
       {kind: 'typescriptProjectMissing'},
-    ))}
+    )), lineBoxChecks}
   }
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   return {
+    lineBoxChecks,
     checks: suite.constraints.map(constraint => {
       const target = targetForConstraint(suite, constraint)
       const sourceFile = resolve(configDirectory, target.source.file)
@@ -94,6 +99,19 @@ export function runStaticLayoutSuite(suite: StaticLayoutSuite, configDirectory: 
       return auditSourceConstraint(projectSource, constraint, target, configDirectory)
     }),
   }
+}
+
+function runLineBoxClaims(suite: StaticLayoutSuite, configDirectory: string): LineBoxCheck[] {
+  if (suite.lineBoxContainment.length === 0) return []
+  const index = resolveCssClasses(configDirectory)
+  if (index.stylesheets.length === 0) {
+    return suite.lineBoxContainment.map(claim => ({
+      kind: 'unknown' as const,
+      claim: claim.name,
+      reason: 'no stylesheets were discovered under the config directory',
+    }))
+  }
+  return suite.lineBoxContainment.map(claim => checkLineBoxContainment(claim, index))
 }
 
 function targetForConstraint(suite: StaticLayoutSuite, constraint: StaticLayoutConstraint): StaticLayoutTarget {
