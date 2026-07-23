@@ -71,6 +71,71 @@ export function Panel() {
     for (const finding of displaced.findings) expect(finding.severity).toBe('shift')
   })
 
+  test('always-out-of-flow elements are overlay-bounded motion; toggling flow mode is not', () => {
+    // The hover-reveal action rail: hidden→flex on an element that is absolute in every state.
+    const revealed = audit(`<div className="absolute bottom-4 hidden group-hover:flex" />`)
+    expect(revealed.findings).toHaveLength(1)
+    expect(revealed.findings[0]).toMatchObject({kind: 'variantGeometry', severity: 'motion'})
+    expect(revealed.findings[0]!.evidence).toContain('out of flow in every branch')
+
+    // A hook moving an absolute menu between two anchors: overlay glide, siblings never move.
+    const glided = auditStateGeometrySource('State.tsx', `
+export function Menu() {
+  const [pinned, setPinned] = useState(false)
+  return <div className={pinned ? 'absolute pl-2' : 'absolute pl-8'} />
+}
+`)
+    expect(glided.findings).toHaveLength(1)
+    expect(glided.findings[0]).toMatchObject({kind: 'branchGeometry', severity: 'motion'})
+
+    // State toggling position itself pulls the element out of flow: siblings collapse in — the
+    // opposite of an overlay, and the guard must keep it top-tier.
+    const modeToggled = auditStateGeometrySource('State.tsx', `
+export function Panel() {
+  const [floating, setFloating] = useState(false)
+  return <div className={floating ? 'absolute pl-2' : 'pl-2'} />
+}
+`)
+    expect(modeToggled.findings.length).toBeGreaterThan(0)
+    for (const finding of modeToggled.findings) expect(finding.severity).toBe('shift')
+
+    // Containment rung: an in-flow child whose ancestor is absolute in every branch reflows only
+    // the overlay's interior.
+    const contained = audit(`<div className="absolute inset-x-0 bottom-0"><span className="hidden group-hover:block" /></div>`)
+    const child = contained.findings.find(finding => finding.detail.includes('group-hover:block'))
+    expect(child).toMatchObject({severity: 'motion'})
+    expect(child!.evidence).toContain('inside an out-of-flow ancestor')
+  })
+
+  test('transition tokens classify how the difference plays out in time', () => {
+    // Box property under transition-all: the shift is animated reflow, every frame of it.
+    const animated = auditStateGeometrySource('State.tsx', `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'transition-all pl-8' : 'transition-all pl-2'} />
+}
+`)
+    expect(animated.findings[0]!.severity).toBe('shift')
+    expect(animated.findings[0]!.evidence).toContain('layout reflows every frame')
+
+    // Split coverage: width tweens under the default transition scope, padding snaps beside it.
+    const partial = auditStateGeometrySource('State.tsx', `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'transition translate-x-4 pl-8' : 'transition translate-x-0 pl-2'} />
+}
+`)
+    expect(partial.findings[0]!.evidence).toContain('partial tween')
+
+    // Display cannot tween: a declared transition still pops the flip.
+    const popped = audit(`<div className="transition-all hidden group-hover:flex" />`)
+    expect(popped.findings[0]!.evidence).toContain('so the flip pops')
+
+    // No transition declared: no timing clause at all.
+    const instant = audit(`<button className="rounded hover:border" />`)
+    expect(instant.findings[0]!.evidence).not.toContain('transition:')
+  })
+
   test('conditional spacing, font size, and display changes are findings; color and rounding are not', () => {
     expect(audit(`<div className={active ? 'pl-2' : 'pl-4'} />`).findings).toHaveLength(1)
     expect(audit(`<div className={active ? 'text-sm' : 'text-lg'} />`).findings).toHaveLength(1)

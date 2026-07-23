@@ -20,9 +20,11 @@ export type StateGeometryFinding = {
   magnitudePx: number | null
   // Two-axis severity. 'shift': the discriminant can change while the element is mounted (state or
   // pseudo-state), so the geometry difference is visible motion — or a call site overrides the
-  // component template's own geometry. 'motion': the discriminant is (or may be) live, but every
-  // differing family is a transform — translate, scale, rotate move pixels on screen without
-  // reflowing neighbors, so nothing is displaced; slide-reveals and hover nudges land here.
+  // component template's own geometry. 'motion': the discriminant is (or may be) live, but the
+  // difference cannot displace a sibling — either every differing family is a transform
+  // (translate, scale, rotate move pixels without reflowing neighbors), or the element is out of
+  // normal flow in every branch (or nested inside an always-out-of-flow ancestor), bounding the
+  // change to the overlay; slide-reveals, hover nudges, and overlay reveals land here.
   // 'config': provably immobile — every call site fixes the discriminant with a literal, or the
   // instance difference lies in caller-owned families the template never declared. 'unclear': the
   // bounded analysis cannot decide.
@@ -417,10 +419,13 @@ export function auditStateGeometryFile(
   propIndex?: PropLiteralIndex,
 ): StateGeometryFileAudit {
   const audit: StateGeometryFileAudit = {file: sourceFile.fileName, findings: [], coverage: [], instances: []}
-  const visit = (node: ts.Node): void => {
+  // The overlay flag travels down the JSX tree during the one visit pass (program-loaded source
+  // files carry no parent pointers, so ancestry cannot be walked upward). An element's own
+  // className is judged from outside its overlay: only its JSX children inherit the containment.
+  const visit = (node: ts.Node, insideOverlay: boolean): void => {
     if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name)
       && (node.name.text === 'className' || node.name.text === 'class')) {
-      auditClassAttribute(node, sourceFile, audit, propIndex)
+      auditClassAttribute(node, sourceFile, audit, propIndex, insideOverlay)
     }
     if (registry != null && (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
       && ts.isIdentifier(node.tagName)) {
@@ -429,10 +434,38 @@ export function auditStateGeometryFile(
         collectInstance(node, node.tagName.text, template, sourceFile, audit)
       }
     }
-    ts.forEachChild(node, visit)
+    if (ts.isJsxElement(node)) {
+      const overlayForChildren = insideOverlay || elementAlwaysOutOfFlow(node.openingElement)
+      visit(node.openingElement, insideOverlay)
+      for (const child of node.children) visit(child, overlayForChildren)
+      visit(node.closingElement, insideOverlay)
+      return
+    }
+    ts.forEachChild(node, child => { visit(child, insideOverlay) })
   }
-  visit(sourceFile)
+  visit(sourceFile, false)
   return audit
+}
+
+// Whether an intrinsic element is out of normal flow in every branch of its own className. Only
+// intrinsic elements make the claim (a component's className lands who knows where), and a
+// className that cannot be fully extracted makes no claim at all.
+function elementAlwaysOutOfFlow(opening: ts.JsxOpeningElement): boolean {
+  if (!ts.isIdentifier(opening.tagName) || !/^[a-z]/.test(opening.tagName.text)) return false
+  const className = opening.attributes.properties.find((property): property is ts.JsxAttribute =>
+    ts.isJsxAttribute(property) && ts.isIdentifier(property.name) && property.name.text === 'className')
+  const initializer = className?.initializer
+  const expression = initializer == null
+    ? null
+    : ts.isStringLiteral(initializer)
+      ? initializer
+      : ts.isJsxExpression(initializer) && initializer.expression != null
+        ? initializer.expression
+        : null
+  if (expression == null) return false
+  const extraction = extractBranches(expression, undefined, [])
+  return extraction.complete && extraction.branches.length > 0
+    && extraction.branches.every(branch => outOfFlowTokens(branch))
 }
 
 function collectInstance(
@@ -490,7 +523,8 @@ function auditClassAttribute(
   attribute: ts.JsxAttribute,
   sourceFile: ts.SourceFile,
   audit: StateGeometryFileAudit,
-  propIndex?: PropLiteralIndex,
+  propIndex: PropLiteralIndex | undefined,
+  insideOverlay: boolean,
 ): void {
   const initializer = attribute.initializer
   if (initializer == null) return
@@ -516,17 +550,29 @@ function auditClassAttribute(
     const differences = compareTokensAcrossIntervals(branches[0]!, branches[index]!)
     if (differences.length === 0) continue
     const {mobility, evidence} = classifyDiscriminants(conditions, attribute, sourceFile, propIndex)
+    // Overlay bounding for this comparison: out of flow in both branches (and the branches not
+    // disagreeing on position itself), or nested inside an always-out-of-flow ancestor.
+    const selfOverlay = outOfFlowTokens(branches[0]!) && outOfFlowTokens(branches[index]!)
+    const ancestorOverlay = selfOverlay ? false : insideOverlay
     for (const difference of differences) {
+      const overlay = (selfOverlay || ancestorOverlay) && !difference.keys.includes('position')
+      const timing = transitionNote(difference.keys, [...branches[0]!, ...branches[index]!])
+      const clauses = [
+        evidence,
+        overlay ? selfOverlay ? 'out of flow in every branch' : 'inside an out-of-flow ancestor' : null,
+        timing == null ? null : `transition: ${timing}`,
+      ].filter(clause => clause != null)
       audit.findings.push({
         file: audit.file,
         line,
         kind: 'branchGeometry',
-        // A transform-only difference is bounded to paint motion whatever the discriminant turns
-        // out to be, so it outranks nothing but config even when mobility is unresolved.
-        severity: transformOnlyFamilies(difference.keys)
+        // Transform-only and overlay-bounded differences are bounded to paint motion whatever the
+        // discriminant turns out to be, so they outrank nothing but config even when mobility is
+        // unresolved.
+        severity: transformOnlyFamilies(difference.keys) || overlay
           ? mobility === 'immobile' ? 'config' : 'motion'
           : mobility === 'mobile' ? 'shift' : mobility === 'immobile' ? 'config' : 'unclear',
-        evidence,
+        evidence: clauses.join('; '),
         magnitudePx: difference.magnitudePx,
         detail: difference.label == null
           ? difference.detail
@@ -557,12 +603,22 @@ function auditClassAttribute(
       const basePx = base == null ? 0 : pixelsOf(parsed.family, base)
       const magnitudePx = variantPx != null && basePx != null ? Math.abs(variantPx - basePx) : null
       if (magnitudePx === 0) continue
+      // Overlay bounding: the variant fires on a mounted element whose base position is already
+      // out of flow (or whose ancestor is), unless the variant toggles position itself.
+      const selfOutOfFlow = outOfFlowTokens(branch)
+      const overlay = parsed.family !== 'position' && (selfOutOfFlow || insideOverlay)
+      const timing = transitionNote([parsed.family], branch)
+      const clauses = [
+        'pseudo-state variants transition on mounted elements',
+        overlay ? selfOutOfFlow ? 'out of flow in every branch' : 'inside an out-of-flow ancestor' : null,
+        timing == null ? null : `transition: ${timing}`,
+      ].filter(clause => clause != null)
       audit.findings.push({
         file: audit.file,
         line,
         kind: 'variantGeometry',
-        severity: transformOnlyFamilies([parsed.family]) ? 'motion' : 'shift',
-        evidence: 'pseudo-state variants transition on mounted elements',
+        severity: transformOnlyFamilies([parsed.family]) || overlay ? 'motion' : 'shift',
+        evidence: clauses.join('; '),
         magnitudePx,
         detail: base == null
           ? `'${token}' adds ${parsed.family}${variantPx == null ? '' : ` (+${trim(variantPx)}px)`} on a state with no base reservation`
@@ -584,6 +640,82 @@ function transformOnlyFamilies(families: Iterable<string>): boolean {
     if (!transformFamilyPattern.test(family)) return false
   }
   return any
+}
+
+// An element that is absolutely positioned or fixed in EVERY branch is out of normal flow in
+// every state, so no difference between its branches can displace a sibling — the change is
+// bounded to the overlay itself. The claim needs the position utility variantless (a responsive
+// or state-gated `absolute` proves nothing about the other widths and states), and it is void
+// when the branches disagree on position: a state that toggles the flow mode itself is the
+// opposite of an overlay — siblings collapse in or get pushed out, top-tier shift.
+function outOfFlowTokens(tokens: string[]): boolean {
+  for (const token of tokens) {
+    const parsed = classifyToken(token)
+    if (parsed.family === 'position' && parsed.variants.length === 0
+      && (parsed.value === 'absolute' || parsed.value === 'fixed')) return true
+  }
+  return false
+}
+
+// How the difference plays out in time. The same token list that declares the state's geometry
+// declares its transitions, so the scan can say whether the change snaps, tweens smoothly, or
+// animates a reflow — the failure modes live in the journey between states, not just at the two
+// ends. Only variantless transition utilities count; keyframe `animate-*` utilities are outside
+// this claim. Returns null when no transition is declared (the change is simply instant).
+function transitionNote(families: Iterable<string>, tokens: string[]): string | null {
+  let scope: 'all' | 'default' | 'transform' | 'paint' | 'none' | null = null
+  let arbitrary: string | null = null
+  const broadness = {none: 0, paint: 1, transform: 2, default: 3, all: 4} as const
+  for (const token of tokens) {
+    const parsed = classifyToken(token)
+    if (parsed.variants.length > 0) continue
+    const bare = token
+    if (bare === 'transition' || bare === 'transition-DEFAULT') {
+      if (scope == null || broadness[scope] < broadness.default) scope = 'default'
+    } else if (bare === 'transition-all') scope = 'all'
+    else if (bare === 'transition-none') scope ??= 'none'
+    else if (bare === 'transition-transform') {
+      if (scope == null || broadness[scope] < broadness.transform) scope = 'transform'
+    } else if (/^transition-(colors|opacity|shadow)$/.test(bare)) {
+      if (scope == null || broadness[scope] < broadness.paint) scope = 'paint'
+    } else if (/^transition-\[.+\]$/.test(bare)) arbitrary = bare.slice('transition-['.length, -1)
+  }
+  if (scope == null && arbitrary == null) return null
+  if (scope === 'none') return null
+
+  const shorthandCss: Record<string, string> = {
+    'w': 'width', 'h': 'height', 'max-w': 'max-width', 'max-h': 'max-height',
+    'min-w': 'min-width', 'min-h': 'min-height', 'gap': 'gap', 'inset': 'inset',
+  }
+  const cssName = (family: string): string => {
+    if (transformFamilyPattern.test(family)) return 'transform'
+    const bare = family.replace(/^-/, '')
+    const cell = bare.match(/^(border|padding|margin):/)
+    if (cell != null) return cell[1]!
+    return shorthandCss[bare] ?? bare
+  }
+  const covered = (family: string): boolean => {
+    if (family === 'display' || family === 'position') return false
+    if (arbitrary != null && arbitrary.includes(cssName(family))) return true
+    if (scope === 'all') return true
+    if (scope === 'default' || scope === 'transform') return transformFamilyPattern.test(family)
+    return false
+  }
+
+  const familyArray = [...families]
+  if (familyArray.some(family => family === 'display' || family === 'position')) {
+    return 'a declared transition cannot tween display or position, so the flip pops'
+  }
+  const tweenNames = new Set<string>()
+  const snapNames = new Set<string>()
+  for (const family of familyArray) (covered(family) ? tweenNames : snapNames).add(cssName(family))
+  if (snapNames.size === 0) {
+    return [...tweenNames].every(name => name === 'transform')
+      ? 'the differing transforms tween under the declared transition'
+      : `box properties (${[...tweenNames].join(', ')}) tween under the declared transition — layout reflows every frame of it`
+  }
+  if (tweenNames.size === 0) return 'the declared transition covers none of the differing properties, so the change snaps beside it'
+  return `partial tween: ${[...tweenNames].join(', ')} tween while ${[...snapNames].join(', ')} snap mid-flight`
 }
 
 type BranchExtraction = {branches: string[][]; complete: boolean; overflow: boolean}
