@@ -1,4 +1,5 @@
 import * as ts from 'typescript'
+import {canonicalTransform, classifyToken, edgeNames, edgeSpread, pixelsOf, responsiveGate, stateVariantPattern, transformFamilyPattern, transformOnlyFamilies} from '../tailwind/core.ts'
 
 // State-variant geometry scan: across the branches of one conditional className expression, only
 // paint may vary — geometry must be invariant or explicitly reserved. A conditional border width,
@@ -6,6 +7,8 @@ import * as ts from 'typescript'
 // reserving the geometry (border-transparent) or meaning the shift. The scan reads syntax only,
 // like the spacing scan: findings are advisory, dynamic parts become coverage rather than guesses,
 // and it never type-checks and never fails the command.
+
+export {classifyToken, pixelsOf} from '../tailwind/core.ts'
 
 export type StateGeometryFinding = {
   file: string
@@ -253,19 +256,6 @@ function enclosingComponent(node: ts.Node): {name: string; props: Set<string>} |
 // The viewports worth testing are declared by the source itself: every responsive variant names a
 // threshold. Default Tailwind screens plus arbitrary min-[Npx]/max-[Npx] variants; unparseable
 // media logic is not represented here, so the derived set is a lower bound.
-const tailwindScreens: Record<string, number> = {sm: 640, md: 768, lg: 1024, xl: 1280, '2xl': 1536}
-
-// A responsive variant gates a token to a width interval: min-style (sm, md, min-[Npx]) applies
-// at and above the threshold, max-style below it — Tailwind's max-md is width < 768px.
-export function responsiveGate(variant: string): {kind: 'min' | 'max'; px: number} | null {
-  const bare = variant.startsWith('max-') ? variant.slice(4) : variant
-  const screen = tailwindScreens[bare]
-  if (screen != null) return {kind: variant.startsWith('max-') ? 'max' : 'min', px: screen}
-  const arbitrary = /^(min|max)-\[(\d+(?:\.\d+)?)px\]$/.exec(variant)
-  if (arbitrary != null) return {kind: arbitrary[1] as 'min' | 'max', px: Number(arbitrary[2])}
-  return null
-}
-
 export type BreakpointUsage = {
   thresholdPx: number
   variants: Map<string, number>
@@ -282,14 +272,8 @@ export function collectBreakpoints(sourceFile: ts.SourceFile, usage: Map<number,
   }
   const visitToken = (token: string): void => {
     for (const segment of token.split(':').slice(0, -1)) {
-      const bare = segment.startsWith('max-') ? segment.slice(4) : segment
-      const screen = tailwindScreens[bare]
-      if (screen != null) {
-        record(screen, segment)
-        continue
-      }
-      const arbitrary = /^(?:min|max)-\[(\d+(?:\.\d+)?)px\]$/.exec(segment)
-      if (arbitrary != null) record(Number(arbitrary[1]), segment)
+      const gate = responsiveGate(segment)
+      if (gate != null) record(gate.px, segment)
     }
   }
   const visit = (node: ts.Node): void => {
@@ -439,7 +423,6 @@ export function compareComponentInstances(
 }
 
 const classCombinerNames = new Set(['cn', 'clsx', 'cx', 'classnames', 'twmerge', 'twjoin'])
-const stateVariantPattern = /^(hover|focus|focus-visible|focus-within|active|visited|disabled|checked|open|group-[\w[\]=-]+|peer-[\w[\]=-]+|data-\[[^\]]+\]|aria-\[[^\]]+\])$/
 const branchLimit = 16
 
 export function auditStateGeometrySource(file: string, source: string): StateGeometryFileAudit {
@@ -909,10 +892,6 @@ function auditClassAttribute(
   }
 }
 
-// Transform families move pixels on screen without entering layout: neighbors never reflow, so a
-// difference confined to them is motion, not displacement. Negative-value spellings keep the
-// leading dash in the family name.
-const transformFamilyPattern = /^-?(translate(-[xyz])?|scale(-[xy])?|rotate(-[xyz])?|skew(-[xy])?)$/
 
 // One rule for both live finding sites: a sibling-safe (bounded) difference is motion however
 // mobile its discriminant, an immobile discriminant is configuration either way, and only an
@@ -922,23 +901,6 @@ function liveSeverity(mobility: Mobility, bounded: boolean): StateGeometryFindin
   if (mobility === 'immobile') return 'config'
   if (bounded) return 'motion'
   return mobility === 'mobile' ? 'shift' : 'unclear'
-}
-
-// Sign-symmetric transform utilities split into two spellings (-translate-x-14 vs
-// translate-x-14) whose families never compared, silently skipping real state differences.
-// The comparison surfaces canonicalize to the bare family with the sign folded into the value.
-function canonicalTransform(family: string): {family: string; sign: 1 | -1} | null {
-  if (!transformFamilyPattern.test(family)) return null
-  return family.startsWith('-') ? {family: family.slice(1), sign: -1} : {family, sign: 1}
-}
-
-function transformOnlyFamilies(families: Iterable<string>): boolean {
-  let any = false
-  for (const family of families) {
-    any = true
-    if (!transformFamilyPattern.test(family)) return false
-  }
-  return any
 }
 
 // An element that is absolutely positioned or fixed in EVERY branch is out of normal flow in
@@ -1131,7 +1093,6 @@ type BranchBox = {
   categorical: Map<string, string>
 }
 
-const edgeNames = ['left', 'right', 'top', 'bottom'] as const
 
 // gateOrder models Tailwind's stylesheet ordering: media-variant blocks are emitted after the
 // base utilities, so a responsive token beats an ungated one in its interval; among responsive
@@ -1326,54 +1287,6 @@ function compareBranchBoxes(
   }
 }
 
-type EdgeSpread = {
-  group: 'border' | 'padding' | 'margin'
-  edges: readonly (typeof edgeNames)[number][]
-  negative: boolean
-}
-
-function edgeSpread(family: string): EdgeSpread | null {
-  const negative = family.startsWith('-')
-  const bare = negative ? family.slice(1) : family
-  const insetMap: Record<string, readonly (typeof edgeNames)[number][]> = {
-    'border-width': edgeNames, 'border-width-x': ['left', 'right'], 'border-width-y': ['top', 'bottom'],
-    'border-width-l': ['left'], 'border-width-r': ['right'], 'border-width-t': ['top'], 'border-width-b': ['bottom'],
-    'border-width-s': ['left'], 'border-width-e': ['right'],
-    p: edgeNames, px: ['left', 'right'], py: ['top', 'bottom'],
-    pl: ['left'], pr: ['right'], pt: ['top'], pb: ['bottom'], ps: ['left'], pe: ['right'],
-  }
-  const marginMap: Record<string, readonly (typeof edgeNames)[number][]> = {
-    m: edgeNames, mx: ['left', 'right'], my: ['top', 'bottom'],
-    ml: ['left'], mr: ['right'], mt: ['top'], mb: ['bottom'], ms: ['left'], me: ['right'],
-  }
-  const inset = insetMap[bare]
-  if (inset != null) {
-    return {group: bare.startsWith('border') ? 'border' : 'padding', edges: inset, negative}
-  }
-  const margin = marginMap[bare]
-  if (margin != null) return {group: 'margin', edges: margin, negative}
-  return null
-}
-
-// Tailwind's default numeric scale is 4px per step; border widths default to 1px. Values outside
-// the modeled forms return null and stay categorical rather than being guessed.
-export function pixelsOf(family: string, value: string): number | null {
-  const bareFamily = family.startsWith('-') ? family.slice(1) : family
-  if (bareFamily.startsWith('border-width')) {
-    if (value === '' || value === '1') return value === '' ? 1 : 1
-    if (/^\d+$/.test(value)) return Number(value)
-    const arbitrary = /^\[(\d+(?:\.\d+)?)px\]$/.exec(value)
-    return arbitrary == null ? null : Number(arbitrary[1])
-  }
-  if (value === 'px') return 1
-  if (/^\d+(\.\d+)?$/.test(value)) return Number(value) * 4
-  const arbitraryPx = /^\[(\d+(?:\.\d+)?)px\]$/.exec(value)
-  if (arbitraryPx != null) return Number(arbitraryPx[1])
-  const arbitraryRem = /^\[(\d+(?:\.\d+)?)rem\]$/.exec(value)
-  if (arbitraryRem != null) return Number(arbitraryRem[1]) * 16
-  return null
-}
-
 function signed(value: number): string {
   return value > 0 ? `+${trim(value)}` : `${trim(value)}`
 }
@@ -1382,79 +1295,6 @@ function trim(value: number): string {
   return `${Number(value.toFixed(3))}`
 }
 
-type TokenClassification = {
-  kind: 'geometry' | 'paint' | 'unknown'
-  family: string
-  value: string
-  variants: string[]
-  important: boolean
-}
-
-const displayUtilities = new Set(['block', 'inline', 'inline-block', 'inline-flex', 'inline-grid', 'flex', 'grid', 'hidden', 'contents', 'table'])
-const positionUtilities = new Set(['absolute', 'relative', 'fixed', 'sticky', 'static'])
-const fontSizeScale = new Set(['xs', 'sm', 'base', 'lg', 'xl', '2xl', '3xl', '4xl', '5xl', '6xl', '7xl', '8xl', '9xl'])
-const paintRoots = new Set(['bg', 'rounded', 'ring', 'outline', 'shadow', 'opacity', 'fill', 'stroke', 'decoration', 'divide', 'accent', 'caret', 'from', 'via', 'to'])
-const spacingRoots = new Set(['p', 'px', 'py', 'pt', 'pr', 'pb', 'pl', 'ps', 'pe', 'm', 'mx', 'my', 'mt', 'mr', 'mb', 'ml', 'ms', 'me', 'gap', 'gap-x', 'gap-y', 'space-x', 'space-y', 'w', 'h', 'size', 'min-w', 'min-h', 'max-w', 'max-h', 'inset', 'inset-x', 'inset-y', 'top', 'right', 'bottom', 'left', 'start', 'end', 'leading', 'basis', 'indent', 'translate-x', 'translate-y'])
-
-export function classifyToken(rawToken: string): TokenClassification {
-  if (rawToken === holeToken) return {kind: 'unknown', family: 'className-hole', value: '', variants: [], important: false}
-  const segments = rawToken.split(':')
-  let utility = segments[segments.length - 1]!
-  const variants = segments.slice(0, -1)
-  let important = false
-  if (utility.endsWith('!')) {
-    important = true
-    utility = utility.slice(0, -1)
-  } else if (utility.startsWith('!')) {
-    important = true
-    utility = utility.slice(1)
-  }
-  const negative = utility.startsWith('-')
-  const bare = negative ? utility.slice(1) : utility
-
-  if (displayUtilities.has(bare)) return {kind: 'geometry', family: 'display', value: bare, variants, important}
-  if (positionUtilities.has(bare)) return {kind: 'geometry', family: 'position', value: bare, variants, important}
-  if (bare.startsWith('aspect-')) {
-    // aspect-ratio couples inline size to block size: a reflow lever with no length token.
-    return {kind: 'geometry', family: 'aspect', value: bare.slice('aspect-'.length), variants, important}
-  }
-  if (bare === 'grow' || bare === 'shrink' || bare === 'flex-1' || bare === 'flex-auto' || bare === 'flex-none' || bare === 'flex-initial') {
-    return {kind: 'geometry', family: 'flex', value: bare, variants, important}
-  }
-
-  const dash = bare.indexOf('-')
-  const root = dash === -1 ? bare : bare.slice(0, dash)
-  const value = dash === -1 ? '' : bare.slice(dash + 1)
-
-  if (root === 'border') {
-    // 'border', 'border-2', 'border-t', 'border-t-2', 'border-[3px]' are widths (geometry);
-    // 'border-transparent', 'border-red-500/50', 'border-t-light-100' are colors (paint);
-    // 'border-solid'/'border-dashed' are style (paint: no layout effect once width is set).
-    const parts = value === '' ? [] : value.split('-')
-    const edge = parts.length > 0 && /^(t|r|b|l|x|y|s|e)$/.test(parts[0]!) ? parts.shift()! : ''
-    const remainder = parts.join('-')
-    if (remainder === '' || /^\d+$/.test(remainder) || /^\[\d+(px|rem|em)\]$/.test(remainder)) {
-      return {kind: 'geometry', family: `border-width${edge === '' ? '' : `-${edge}`}`, value: remainder === '' ? '1' : remainder, variants, important}
-    }
-    if (/^(solid|dashed|dotted|double|none|hidden)$/.test(remainder)) {
-      return {kind: 'paint', family: 'border-style', value: remainder, variants, important}
-    }
-    return {kind: 'paint', family: 'border-color', value: remainder, variants, important}
-  }
-  if (root === 'text') {
-    if (fontSizeScale.has(value) || /^\[\d+(px|rem|em)\]$/.test(value)) {
-      return {kind: 'geometry', family: 'font-size', value, variants, important}
-    }
-    return {kind: 'paint', family: 'text-color', value, variants, important}
-  }
-  if (spacingRoots.has(root) || spacingRoots.has(`${root}-${value.split('-')[0] ?? ''}`)) {
-    const composite = spacingRoots.has(`${root}-${value.split('-')[0] ?? ''}`) ? `${root}-${value.split('-')[0]}` : root
-    const amount = composite === root ? value : value.split('-').slice(1).join('-')
-    return {kind: 'geometry', family: `${negative ? '-' : ''}${composite}`, value: amount, variants, important}
-  }
-  if (paintRoots.has(root)) return {kind: 'paint', family: root, value, variants, important}
-  return {kind: 'unknown', family: root, value, variants, important}
-}
 
 // The structured report: everything the text report says, as data — for tooling that diffs scans
 // across worktrees (a PR battery) instead of parsing prose. Files and any paths embedded in
