@@ -63,10 +63,23 @@ export type ComponentTemplate = {
   ownGeometry: Set<string>
 }
 
-export type ComponentRegistry = Map<string, ComponentTemplate | 'ambiguous'>
+// A component's identity is its declaring module plus its declared name — never the bare tag
+// text. Three unrelated <Pill>s in three files are three identities and must not cross-compare;
+// only a name declared twice within ONE module is 'ambiguous' and makes no claim.
+export type ModuleTemplates = {
+  byName: Map<string, ComponentTemplate | 'ambiguous'>
+  // The declared name behind `export default`, when it is a named declaration the scan can see —
+  // lets a default import resolve to the declaring name without guessing from the importer's
+  // chosen alias.
+  defaultExportName: string | null
+}
+
+export type ComponentRegistry = Map<string, ModuleTemplates>
 
 export type ComponentInstance = {
+  // The template's declared name: canonical across aliased imports, used for display.
   component: string
+  template: ComponentTemplate
   file: string
   line: number
   tokens: string[]
@@ -334,6 +347,11 @@ function localBindingIndex(sourceFile: ts.SourceFile): Map<string, 'hook' | 'lit
 }
 
 export function collectComponentTemplates(sourceFile: ts.SourceFile, registry: ComponentRegistry): void {
+  let moduleTemplates = registry.get(sourceFile.fileName)
+  if (moduleTemplates == null) {
+    moduleTemplates = {byName: new Map(), defaultExportName: null}
+    registry.set(sourceFile.fileName, moduleTemplates)
+  }
   const register = (name: string, body: ts.Node): void => {
     if (!/^[A-Z]/.test(name)) return
     const attributes: ts.JsxAttribute[] = []
@@ -361,7 +379,7 @@ export function collectComponentTemplates(sourceFile: ts.SourceFile, registry: C
       complete: extraction.complete,
       ownGeometry: syntacticGeometryKeys(ownBranch),
     }
-    registry.set(name, registry.has(name) ? 'ambiguous' : template)
+    moduleTemplates.byName.set(name, moduleTemplates.byName.has(name) ? 'ambiguous' : template)
   }
   const visitTop = (node: ts.Node): void => {
     if (ts.isFunctionDeclaration(node) && node.name != null && node.body != null) {
@@ -373,6 +391,14 @@ export function collectComponentTemplates(sourceFile: ts.SourceFile, registry: C
     ts.forEachChild(node, visitTop)
   }
   visitTop(sourceFile)
+  for (const statement of sourceFile.statements) {
+    if (ts.isExportAssignment(statement) && !statement.isExportEquals && ts.isIdentifier(statement.expression)) {
+      moduleTemplates.defaultExportName = statement.expression.text
+    } else if (ts.isFunctionDeclaration(statement) && statement.name != null
+      && statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.DefaultKeyword) === true) {
+      moduleTemplates.defaultExportName = statement.name.text
+    }
+  }
 }
 
 function expressionMentionsIdentifier(expression: ts.Node, name: string): boolean {
@@ -385,21 +411,20 @@ function expressionMentionsIdentifier(expression: ts.Node, name: string): boolea
 }
 
 // Cross-instance comparison over the collected call sites: every instance compares against the
-// first, so one divergent call site is one finding.
-export function compareComponentInstances(
-  instances: ComponentInstance[],
-  registry?: ComponentRegistry,
-): StateGeometryFinding[] {
-  const byComponent = new Map<string, ComponentInstance[]>()
+// first, so one divergent call site is one finding. Instances group by their resolved template —
+// the declaring module plus name — so same-name components in different files never
+// cross-compare.
+export function compareComponentInstances(instances: ComponentInstance[]): StateGeometryFinding[] {
+  const byTemplate = new Map<ComponentTemplate, ComponentInstance[]>()
   for (const instance of instances) {
-    const list = byComponent.get(instance.component)
-    if (list == null) byComponent.set(instance.component, [instance])
+    const list = byTemplate.get(instance.template)
+    if (list == null) byTemplate.set(instance.template, [instance])
     else list.push(instance)
   }
   const findings: StateGeometryFinding[] = []
-  for (const [component, list] of byComponent) {
-    const template = registry?.get(component)
-    const ownGeometry = template != null && template !== 'ambiguous' ? template.ownGeometry : new Set<string>()
+  for (const [template, list] of byTemplate) {
+    const component = list[0]!.component
+    const ownGeometry = template.ownGeometry
     for (let index = 1; index < list.length; index++) {
       for (const difference of compareTokensAcrossIntervals(list[0]!.tokens, list[index]!.tokens)) {
         const overridesTemplate = difference.keys.some(key => ownGeometry.has(key))
@@ -425,10 +450,18 @@ export function compareComponentInstances(
 const classCombinerNames = new Set(['cn', 'clsx', 'cx', 'classnames', 'twmerge', 'twjoin'])
 const branchLimit = 16
 
+export type StateGeometryOptions = {
+  tailwind?: boolean
+  // Resolves an import specifier from a file to the project source it names. Instance
+  // comparison uses it to key call sites on the declaring module rather than the bare tag name;
+  // without it (or when it returns null), imported components make no instance claim.
+  resolveModule?: (specifier: string, fromFile: string) => string | null
+}
+
 export function auditStateGeometrySource(
   file: string,
   source: string,
-  options: {tailwind?: boolean} = {},
+  options: StateGeometryOptions = {},
 ): StateGeometryFileAudit {
   const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   const registry: ComponentRegistry = new Map()
@@ -436,15 +469,64 @@ export function auditStateGeometrySource(
   const propIndex: PropLiteralIndex = new Map()
   collectPropLiterals(sourceFile, propIndex)
   const audit = auditStateGeometryFile(sourceFile, registry, propIndex, options)
-  audit.findings.push(...compareComponentInstances(audit.instances, registry))
+  audit.findings.push(...compareComponentInstances(audit.instances))
   return audit
+}
+
+// What a capitalized JSX tag in one file can refer to, read from syntax alone: a declaration in
+// the same file (whether or not it qualified as a template), or a default/named import. A tag
+// with neither referent is unknown and makes no instance claim.
+type ImportBinding = {specifier: string; imported: {kind: 'named'; name: string} | {kind: 'default'}}
+
+function collectImportBindings(sourceFile: ts.SourceFile): Map<string, ImportBinding> {
+  const bindings = new Map<string, ImportBinding>()
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue
+    const specifier = statement.moduleSpecifier.text
+    const clause = statement.importClause
+    if (clause == null) continue
+    if (clause.name != null) bindings.set(clause.name.text, {specifier, imported: {kind: 'default'}})
+    if (clause.namedBindings != null && ts.isNamedImports(clause.namedBindings)) {
+      for (const element of clause.namedBindings.elements) {
+        bindings.set(element.name.text,
+          {specifier, imported: {kind: 'named', name: (element.propertyName ?? element.name).text}})
+      }
+    }
+  }
+  return bindings
+}
+
+// Every name the file declares itself — functions, classes, variables, binding elements. A local
+// declaration shadows any template registered elsewhere under the same name, qualified or not:
+// this is what keeps a file's own unqualified <Pill> from matching another module's Pill.
+function collectLocalDeclarationNames(sourceFile: ts.SourceFile): Set<string> {
+  const names = new Set<string>()
+  const recordBinding = (binding: ts.BindingName): void => {
+    if (ts.isIdentifier(binding)) {
+      names.add(binding.text)
+      return
+    }
+    for (const element of binding.elements) {
+      if (ts.isBindingElement(element)) recordBinding(element.name)
+    }
+  }
+  const visit = (node: ts.Node): void => {
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name != null) {
+      names.add(node.name.text)
+    } else if (ts.isVariableDeclaration(node)) {
+      recordBinding(node.name)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return names
 }
 
 export function auditStateGeometryFile(
   sourceFile: ts.SourceFile,
   registry?: ComponentRegistry,
   propIndex?: PropLiteralIndex,
-  options: {tailwind?: boolean} = {},
+  options: StateGeometryOptions = {},
 ): StateGeometryFileAudit {
   // Without Tailwind, className tokens have no vocabulary: evaluating them by the default scale
   // on a project that hand-writes look-alike classes would answer wrongly with confidence. The
@@ -452,6 +534,28 @@ export function auditStateGeometryFile(
   // style-attribute channel reads real values and needs no vocabulary, so it always runs.
   const tailwind = options.tailwind ?? true
   const audit: StateGeometryFileAudit = {file: sourceFile.fileName, findings: [], coverage: [], instances: []}
+  const localNames = registry == null ? null : collectLocalDeclarationNames(sourceFile)
+  const importBindings = registry == null ? null : collectImportBindings(sourceFile)
+  // A tag resolves to a template through its referent's identity, never the bare name: a local
+  // declaration binds to this file's entry (present or not), an import binds to the module the
+  // resolver names, and an unknown referent binds to nothing.
+  const resolveTemplate = (tagName: string): {name: string; template: ComponentTemplate} | null => {
+    if (registry == null) return null
+    if (localNames!.has(tagName)) {
+      const entry = registry.get(sourceFile.fileName)?.byName.get(tagName)
+      return entry == null || entry === 'ambiguous' ? null : {name: tagName, template: entry}
+    }
+    const binding = importBindings!.get(tagName)
+    if (binding == null) return null
+    const moduleFile = options.resolveModule?.(binding.specifier, sourceFile.fileName)
+    if (moduleFile == null) return null
+    const moduleTemplates = registry.get(moduleFile)
+    if (moduleTemplates == null) return null
+    const name = binding.imported.kind === 'named' ? binding.imported.name : moduleTemplates.defaultExportName
+    if (name == null) return null
+    const entry = moduleTemplates.byName.get(name)
+    return entry == null || entry === 'ambiguous' ? null : {name, template: entry}
+  }
   // The overlay flag travels down the JSX tree during the one visit pass (program-loaded source
   // files carry no parent pointers, so ancestry cannot be walked upward). An element's own
   // className is judged from outside its overlay: only its JSX children inherit the containment.
@@ -499,10 +603,10 @@ export function auditStateGeometryFile(
       }
     }
     if (tailwind && registry != null && (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
-      && ts.isIdentifier(node.tagName)) {
-      const template = registry.get(node.tagName.text)
-      if (template != null && template !== 'ambiguous') {
-        collectInstance(node, node.tagName.text, template, sourceFile, audit)
+      && ts.isIdentifier(node.tagName) && /^[A-Z]/.test(node.tagName.text)) {
+      const resolved = resolveTemplate(node.tagName.text)
+      if (resolved != null) {
+        collectInstance(node, resolved.name, resolved.template, sourceFile, audit)
       }
     }
     if (ts.isJsxElement(node)) {
@@ -771,7 +875,7 @@ function collectInstance(
   const templateBranch = template.branches.find(branch => branch.includes(holeToken)) ?? template.branches[0] ?? []
   const callBranch = callBranches[0] ?? []
   const effective = templateBranch.flatMap(token => token === holeToken ? callBranch : [token])
-  audit.instances.push({component, file: audit.file, line, tokens: effective})
+  audit.instances.push({component, template, file: audit.file, line, tokens: effective})
 }
 
 // The geometry families a token list touches, independent of width or override resolution — the

@@ -39,6 +39,7 @@ import {
   loadCheckedTypeScriptProjectGraph,
   loadSyntaxTypeScriptProjectGraph,
   type ProjectSource,
+  type TypeScriptProjectGraph,
 } from './typescript/project.ts'
 
 const spacingNormalization: SpacingReportOptions['normalization'] = {
@@ -224,16 +225,19 @@ export function runProjectStateGeometry(searchFrom: string, json = false): boole
   const tailwind = detectTailwind(dirname(configPath))
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   // Templates first so a call site anywhere in the project can compare against a component
-  // defined in another file; duplicate component names become ambiguous and make no claim.
+  // defined in another file; instances key on the declaring module plus name, so same-name
+  // components in different files stay apart, and a name declared twice in one module becomes
+  // ambiguous and makes no claim.
   const registry: ComponentRegistry = new Map()
   const propIndex: PropLiteralIndex = new Map()
   for (const source of graph.sources) {
     collectComponentTemplates(source.sourceFile, registry)
     collectPropLiterals(source.sourceFile, propIndex)
   }
+  const resolveModule = moduleResolver(graph)
   const audits = graph.sources.map(source =>
-    auditStateGeometryFile(source.sourceFile, registry, propIndex, {tailwind: tailwind.detected}))
-  const instanceFindings = compareComponentInstances(audits.flatMap(audit => audit.instances), registry)
+    auditStateGeometryFile(source.sourceFile, registry, propIndex, {tailwind: tailwind.detected, resolveModule}))
+  const instanceFindings = compareComponentInstances(audits.flatMap(audit => audit.instances))
   if (json) {
     console.log(JSON.stringify({
       ...stateGeometryReportData(audits, instanceFindings, dirname(configPath)),
@@ -272,8 +276,9 @@ export function runFileStateGeometry(file: string, json = false): boolean {
     collectPropLiterals(projectSource.sourceFile, propIndex)
   }
   const tailwind = detectTailwind(dirname(configPath))
-  const audit = auditStateGeometryFile(source.sourceFile, registry, propIndex, {tailwind: tailwind.detected})
-  const instanceFindings = compareComponentInstances(audit.instances, registry)
+  const audit = auditStateGeometryFile(source.sourceFile, registry, propIndex,
+    {tailwind: tailwind.detected, resolveModule: moduleResolver(graph)})
+  const instanceFindings = compareComponentInstances(audit.instances)
   if (json) {
     console.log(JSON.stringify({
       ...stateGeometryReportData([audit], instanceFindings, dirname(configPath)),
@@ -287,6 +292,26 @@ export function runFileStateGeometry(file: string, json = false): boolean {
     console.log(formatStateGeometryReport([audit], instanceFindings))
   }
   return false
+}
+
+// Resolves an import specifier to the graph source file it names, so component instances key on
+// the declaring module rather than the bare tag name. TypeScript's own module resolution honors
+// the owning project's paths and extensions; anything it cannot resolve to a project source
+// returns null, and that call site simply makes no instance claim.
+function moduleResolver(graph: TypeScriptProjectGraph): (specifier: string, fromFile: string) => string | null {
+  const optionsByFile = new Map(graph.sources.map(source =>
+    [source.sourceFile.fileName, source.project.parsed.options] as const))
+  const cache = new Map<string, string | null>()
+  return (specifier, fromFile) => {
+    const key = `${fromFile} ${specifier}`
+    const cached = cache.get(key)
+    if (cached !== undefined) return cached
+    const options = optionsByFile.get(fromFile) ?? graph.entry.parsed.options
+    const resolvedFile = ts.resolveModuleName(specifier, fromFile, options, ts.sys).resolvedModule?.resolvedFileName
+    const result = resolvedFile == null ? null : findProjectSource(graph, resolvedFile)?.sourceFile.fileName ?? null
+    cache.set(key, result)
+    return result
+  }
 }
 
 // `fr --spacing <file>`: one file's slice of the project spacing scan. The tsconfig is

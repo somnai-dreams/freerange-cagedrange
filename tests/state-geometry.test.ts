@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'bun:test'
-import {auditStateGeometrySource, breakpointReportData, classifyToken, collectBreakpoints, formatBreakpointReport, stateGeometryReportData, type BreakpointUsage} from '../src/spacing/state-geometry.ts'
+import {auditStateGeometryFile, auditStateGeometrySource, breakpointReportData, classifyToken, collectBreakpoints, collectComponentTemplates, collectPropLiterals, compareComponentInstances, formatBreakpointReport, stateGeometryReportData, type BreakpointUsage, type ComponentRegistry, type PropLiteralIndex} from '../src/spacing/state-geometry.ts'
 import * as ts from 'typescript'
 
 const audit = (jsx: string) => auditStateGeometrySource('State.tsx', `
@@ -457,6 +457,134 @@ export function Cards() {
     expect(classifyToken('border-light-100')).toMatchObject({kind: 'paint', family: 'border-color'})
     expect(classifyToken('hover:border')).toMatchObject({kind: 'geometry', variants: ['hover']})
     expect(classifyToken('rounded-full')).toMatchObject({kind: 'paint'})
+  })
+})
+
+// A minimal project scan over synthesized files: shared registry and prop index, per-file
+// audits, then the cross-file instance comparison — the same wiring the project runner uses.
+function auditProject(
+  files: Array<[string, string]>,
+  resolveModule?: (specifier: string, fromFile: string) => string | null,
+) {
+  const sourceFiles = files.map(([name, text]) =>
+    ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX))
+  const registry: ComponentRegistry = new Map()
+  const propIndex: PropLiteralIndex = new Map()
+  for (const sourceFile of sourceFiles) {
+    collectComponentTemplates(sourceFile, registry)
+    collectPropLiterals(sourceFile, propIndex)
+  }
+  const options = resolveModule == null ? {} : {resolveModule}
+  const audits = sourceFiles.map(sourceFile =>
+    auditStateGeometryFile(sourceFile, registry, propIndex, options))
+  return {audits, instanceFindings: compareComponentInstances(audits.flatMap(audit => audit.instances))}
+}
+
+describe('component identity across files', () => {
+  const pillTemplate = `
+export function Pill({className}: {className: string}) {
+  return <div className={\`px-2 border \${className}\`} />
+}
+export function Ideas() {
+  return <>
+    <Pill className="mt-1" />
+    <Pill className="mt-1" />
+  </>
+}
+`
+
+  test('a same-name local component never matches another module\'s template', () => {
+    // The field-report failure: three distinct Pills, only one qualifying as a template, and
+    // every <Pill> in the tree compared against it — 110 false findings in one PR. A file whose
+    // own (unqualified) Pill declaration shadows the name must make no instance claim.
+    const {instanceFindings} = auditProject([
+      ['ideas/Pill.tsx', pillTemplate],
+      ['SideBar.tsx', `
+function Pill({label}: {label: string}) {
+  return <span className="p-8 border-4">{label}</span>
+}
+export function SideBar() {
+  return <Pill label="all" />
+}
+`],
+    ])
+    expect(instanceFindings).toEqual([])
+  })
+
+  test('an import only matches when the resolver names the declaring module', () => {
+    const divergentUse = `
+import {Pill} from './Pill'
+export function Bar() {
+  return <Pill className="mt-4" />
+}
+`
+    const resolved = auditProject(
+      [['ideas/Pill.tsx', pillTemplate], ['Bar.tsx', divergentUse]],
+      (specifier, fromFile) =>
+        specifier === './Pill' && fromFile === 'Bar.tsx' ? 'ideas/Pill.tsx' : null,
+    )
+    expect(resolved.instanceFindings).toHaveLength(1)
+    expect(resolved.instanceFindings[0]!.detail).toContain('<Pill> instances disagree')
+
+    // Without resolution the import is an unknown referent: no claim in either direction.
+    const unresolved = auditProject(
+      [['ideas/Pill.tsx', pillTemplate], ['Bar.tsx', divergentUse]],
+      () => null,
+    )
+    expect(unresolved.instanceFindings).toEqual([])
+  })
+
+  test('aliased and default imports resolve to the declared name', () => {
+    const resolve = (specifier: string) => specifier === './Pill' ? 'Pill.tsx' : null
+    const aliased = auditProject([
+      ['Pill.tsx', pillTemplate],
+      ['Bar.tsx', `
+import {Pill as Chip} from './Pill'
+export function Bar() {
+  return <Chip className="mt-4" />
+}
+`],
+    ], resolve)
+    expect(aliased.instanceFindings).toHaveLength(1)
+    expect(aliased.instanceFindings[0]!.detail).toContain('<Pill> instances disagree')
+
+    const defaulted = auditProject([
+      ['Pill.tsx', `
+export default function Pill({className}: {className: string}) {
+  return <div className={\`px-2 border \${className}\`} />
+}
+export function Ideas() {
+  return <>
+    <Pill className="mt-1" />
+    <Pill className="mt-1" />
+  </>
+}
+`],
+      ['Bar.tsx', `
+import AnyName from './Pill'
+export function Bar() {
+  return <AnyName className="mt-4" />
+}
+`],
+    ], resolve)
+    expect(defaulted.instanceFindings).toHaveLength(1)
+    expect(defaulted.instanceFindings[0]!.detail).toContain('<Pill> instances disagree')
+  })
+
+  test('a name declared twice in one module is ambiguous and makes no claim', () => {
+    const {instanceFindings} = auditProject([
+      ['Twice.tsx', `
+export function Outer() {
+  const Pill = ({className}: {className: string}) => <div className={\`border \${className}\`} />
+  return <Pill className="mt-1" />
+}
+export function Other() {
+  const Pill = ({className}: {className: string}) => <span className={\`p-4 \${className}\`} />
+  return <Pill className="mt-4" />
+}
+`],
+    ])
+    expect(instanceFindings).toEqual([])
   })
 })
 
