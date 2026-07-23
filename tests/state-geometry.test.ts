@@ -168,6 +168,26 @@ describe('state-variant geometry scan', () => {
     expect(nudgedIn.findings).toHaveLength(1)
     expect(nudgedIn.findings[0]).toMatchObject({kind: 'variantGeometry', severity: 'motion'})
 
+    // Opposite sign spellings are the same family: the full crossing distance is the magnitude.
+    const crossed = audit(`<button className="-translate-x-14 group-hover:translate-x-0" />`)
+    expect(crossed.findings).toHaveLength(1)
+    expect(crossed.findings[0]).toMatchObject({kind: 'variantGeometry', severity: 'motion', magnitudePx: 56})
+    expect(crossed.findings[0]!.detail).toContain("from the base '-14'")
+
+    const swung = audit(`<button className="translate-x-14 group-hover:-translate-x-14" />`)
+    expect(swung.findings).toHaveLength(1)
+    expect(swung.findings[0]!.magnitudePx).toBe(112)
+
+    // Branch spellings normalize to one signed categorical entry, not an add/remove pair.
+    const flipped = auditStateGeometrySource('State.tsx', `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'translate-x-4' : '-translate-x-4'} />
+}
+`)
+    expect(flipped.findings).toHaveLength(1)
+    expect(flipped.findings[0]!.detail).toContain("translate-x '16px' vs '-16px'")
+
     // Hook-rooted, still transform-only: live motion, but neighbors never move.
     const nudged = auditStateGeometrySource('State.tsx', `
 export function Panel() {

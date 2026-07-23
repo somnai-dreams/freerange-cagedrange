@@ -834,10 +834,13 @@ function auditClassAttribute(
   }
 
   for (const branch of branches) {
-    const baseFamilies = new Map<string, string>()
+    const baseFamilies = new Map<string, {family: string; value: string}>()
     for (const token of branch) {
       const parsed = classifyToken(token)
-      if (parsed.variants.length === 0 && parsed.kind === 'geometry') baseFamilies.set(parsed.family, parsed.value)
+      if (parsed.variants.length === 0 && parsed.kind === 'geometry') {
+        baseFamilies.set(canonicalTransform(parsed.family)?.family ?? parsed.family,
+          {family: parsed.family, value: parsed.value})
+      }
     }
     const reported = new Set<string>()
     for (const token of branch) {
@@ -845,13 +848,17 @@ function auditClassAttribute(
       if (parsed.kind !== 'geometry') continue
       const stateVariants = parsed.variants.filter(variant => stateVariantPattern.test(variant))
       if (stateVariants.length === 0) continue
-      if (baseFamilies.get(parsed.family) === parsed.value) continue
+      const canonicalFamily = canonicalTransform(parsed.family)?.family ?? parsed.family
+      const base = baseFamilies.get(canonicalFamily)
+      if (base != null && base.family === parsed.family && base.value === parsed.value) continue
       const key = `${audit.file}:${token}`
       if (reported.has(key)) continue
       reported.add(key)
-      const base = baseFamilies.get(parsed.family)
-      const variantPx = pixelsOf(parsed.family, parsed.value)
-      const basePx = base == null ? 0 : pixelsOf(parsed.family, base)
+      const sign = (family: string): number => canonicalTransform(family)?.sign ?? 1
+      const variantMagnitude = pixelsOf(parsed.family, parsed.value)
+      const variantPx = variantMagnitude == null ? null : sign(parsed.family) * variantMagnitude
+      const baseMagnitude = base == null ? 0 : pixelsOf(base.family, base.value)
+      const basePx = base == null ? 0 : baseMagnitude == null ? null : sign(base.family) * baseMagnitude
       const magnitudePx = variantPx != null && basePx != null ? Math.abs(variantPx - basePx) : null
       if (magnitudePx === 0) continue
       // Overlay bounding: the variant fires on a mounted element whose base position is already
@@ -872,8 +879,8 @@ function auditClassAttribute(
         evidence: clauses.join('; '),
         magnitudePx,
         detail: base == null
-          ? `'${token}' adds ${parsed.family}${variantPx == null ? '' : ` (+${trim(variantPx)}px)`} on a state with no base reservation`
-          : `'${token}' changes ${parsed.family} from the base '${base}' on a state`,
+          ? `'${token}' adds ${parsed.family}${variantMagnitude == null ? '' : ` (+${trim(variantMagnitude)}px)`} on a state with no base reservation`
+          : `'${token}' changes ${canonicalFamily} from the base '${base.family.startsWith('-') ? '-' : ''}${base.value}' on a state`,
       })
     }
   }
@@ -892,6 +899,14 @@ function liveSeverity(mobility: Mobility, bounded: boolean): StateGeometryFindin
   if (mobility === 'immobile') return 'config'
   if (bounded) return 'motion'
   return mobility === 'mobile' ? 'shift' : 'unclear'
+}
+
+// Sign-symmetric transform utilities split into two spellings (-translate-x-14 vs
+// translate-x-14) whose families never compared, silently skipping real state differences.
+// The comparison surfaces canonicalize to the bare family with the sign folded into the value.
+function canonicalTransform(family: string): {family: string; sign: 1 | -1} | null {
+  if (!transformFamilyPattern.test(family)) return null
+  return family.startsWith('-') ? {family: family.slice(1), sign: -1} : {family, sign: 1}
 }
 
 function transformOnlyFamilies(families: Iterable<string>): boolean {
@@ -1114,9 +1129,12 @@ export function evaluateBranchBox(tokens: string[], width: number | null = null)
     // width cells and compare as their own categorical dimension instead of merging with the base.
     const gates = parsed.variants.map(variant => responsiveGate(variant))
     if (gates.some(gate => gate == null) && parsed.variants.length > 0) {
-      const key = `${parsed.variants.join(':')}:${parsed.family}`
+      const transform = canonicalTransform(parsed.family)
+      const key = `${parsed.variants.join(':')}:${transform?.family ?? parsed.family}`
       const normalized = pixelsOf(parsed.family, parsed.value)
-      box.categorical.set(key, normalized == null ? parsed.value : `${trim(normalized)}px`)
+      box.categorical.set(key, normalized == null
+        ? parsed.value
+        : `${trim((transform?.sign ?? 1) * normalized)}px`)
       continue
     }
     let gateOrder = 0
@@ -1143,9 +1161,12 @@ export function evaluateBranchBox(tokens: string[], width: number | null = null)
       }
       continue
     }
-    const key = `${parsed.variants.join(':')}${parsed.variants.length > 0 ? ':' : ''}${parsed.family}`
+    const transform = canonicalTransform(parsed.family)
+    const key = `${parsed.variants.join(':')}${parsed.variants.length > 0 ? ':' : ''}${transform?.family ?? parsed.family}`
     const normalized = pixelsOf(parsed.family, parsed.value)
-    box.categorical.set(key, normalized == null ? parsed.value : `${trim(normalized)}px`)
+    box.categorical.set(key, normalized == null
+      ? parsed.value
+      : `${trim((transform?.sign ?? 1) * normalized)}px`)
   }
   for (const [key, candidates] of cells) {
     box.cells.set(key, resolveCell(candidates))
