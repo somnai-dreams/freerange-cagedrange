@@ -7,6 +7,7 @@
 
 import {existsSync, readFileSync} from 'node:fs'
 import {findLayoutConfig, runProjectLayout} from './layout/project.ts'
+import {detectTailwind} from './tailwind/core.ts'
 import {dirname, relative, resolve} from 'node:path'
 import * as ts from 'typescript'
 import {analyzeCheckedSource, type DetailedAnalysis} from './analyze.ts'
@@ -135,6 +136,13 @@ export function runProjectSpacing(searchFrom: string): boolean {
   if (configPath == null) {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
   }
+  const tailwind = detectTailwind(dirname(configPath))
+  if (!tailwind.detected) {
+    // The ownership scan pairs inline-style positioning against class-based spacing tokens;
+    // without Tailwind the class side has no vocabulary to read.
+    console.log('spacing: Tailwind not detected — class-based spacing has no vocabulary to scan')
+    return false
+  }
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   const audits = graph.sources.map(source => auditProjectSpacingSource(source.sourceFile))
   console.log(formatSpacingReport(audits, spacingReportOptions(graph.entry.parsed.options['pretty'])))
@@ -190,10 +198,21 @@ export function runProjectBreakpoints(searchFrom: string, json = false): boolean
   if (configPath == null) {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
   }
+  const tailwind = detectTailwind(dirname(configPath))
+  if (!tailwind.detected) {
+    // The seams this report derives are Tailwind variant thresholds; without Tailwind there is
+    // no utility vocabulary to read them from.
+    console.log(json
+      ? JSON.stringify({breakpoints: [], seams: [], tailwindDetected: false})
+      : 'breakpoints: Tailwind not detected — no utility-declared seams to derive')
+    return false
+  }
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   const usage = new Map<number, BreakpointUsage>()
   for (const source of graph.sources) collectBreakpoints(source.sourceFile, usage)
-  console.log(json ? JSON.stringify(breakpointReportData(usage)) : formatBreakpointReport(usage))
+  console.log(json
+    ? JSON.stringify({...breakpointReportData(usage), tailwindDetected: true})
+    : formatBreakpointReport(usage))
   return false
 }
 
@@ -202,6 +221,7 @@ export function runProjectStateGeometry(searchFrom: string, json = false): boole
   if (configPath == null) {
     throw new Error(`No tsconfig.json found from ${resolve(searchFrom)} or any parent directory.`)
   }
+  const tailwind = detectTailwind(dirname(configPath))
   const graph = loadSyntaxTypeScriptProjectGraph(configPath)
   // Templates first so a call site anywhere in the project can compare against a component
   // defined in another file; duplicate component names become ambiguous and make no claim.
@@ -211,11 +231,21 @@ export function runProjectStateGeometry(searchFrom: string, json = false): boole
     collectComponentTemplates(source.sourceFile, registry)
     collectPropLiterals(source.sourceFile, propIndex)
   }
-  const audits = graph.sources.map(source => auditStateGeometryFile(source.sourceFile, registry, propIndex))
+  const audits = graph.sources.map(source =>
+    auditStateGeometryFile(source.sourceFile, registry, propIndex, {tailwind: tailwind.detected}))
   const instanceFindings = compareComponentInstances(audits.flatMap(audit => audit.instances), registry)
-  console.log(json
-    ? JSON.stringify(stateGeometryReportData(audits, instanceFindings, dirname(configPath)))
-    : formatStateGeometryReport(audits, instanceFindings))
+  if (json) {
+    console.log(JSON.stringify({
+      ...stateGeometryReportData(audits, instanceFindings, dirname(configPath)),
+      tailwindDetected: tailwind.detected,
+    }))
+  } else {
+    if (!tailwind.detected) {
+      console.log('note: Tailwind not detected — className channels sit out (their token vocabulary '
+        + 'would be a guess); the style-attribute channel below reads real values')
+    }
+    console.log(formatStateGeometryReport(audits, instanceFindings))
+  }
   return false
 }
 
@@ -241,11 +271,21 @@ export function runFileStateGeometry(file: string, json = false): boolean {
     collectComponentTemplates(projectSource.sourceFile, registry)
     collectPropLiterals(projectSource.sourceFile, propIndex)
   }
-  const audit = auditStateGeometryFile(source.sourceFile, registry, propIndex)
+  const tailwind = detectTailwind(dirname(configPath))
+  const audit = auditStateGeometryFile(source.sourceFile, registry, propIndex, {tailwind: tailwind.detected})
   const instanceFindings = compareComponentInstances(audit.instances, registry)
-  console.log(json
-    ? JSON.stringify(stateGeometryReportData([audit], instanceFindings, dirname(configPath)))
-    : formatStateGeometryReport([audit], instanceFindings))
+  if (json) {
+    console.log(JSON.stringify({
+      ...stateGeometryReportData([audit], instanceFindings, dirname(configPath)),
+      tailwindDetected: tailwind.detected,
+    }))
+  } else {
+    if (!tailwind.detected) {
+      console.log('note: Tailwind not detected — className channels sit out (their token vocabulary '
+        + 'would be a guess); the style-attribute channel below reads real values')
+    }
+    console.log(formatStateGeometryReport([audit], instanceFindings))
+  }
   return false
 }
 

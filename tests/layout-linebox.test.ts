@@ -208,6 +208,19 @@ describe('line-box containment', () => {
     if (fitting.kind === 'pass') expect(fitting.boxPx).toBeCloseTo(22, 2)
   })
 
+  test('utility synthesis gates on Tailwind detection', () => {
+    const index = resolveCssClasses(project({
+      'src/a.css': `
+        .prompt-editable { font-size: 15px; line-height: 1.625; }
+        .chip { display: inline-flex; line-height: 23px; }
+      `,
+    }))
+    const gated = checkLineBoxContainment(
+      claim({name: 'chip margin', inline: ['chip', 'mb-0.5']}), index, {tailwind: false})
+    expect(gated.kind).toBe('unknown')
+    if (gated.kind === 'unknown') expect(gated.reason).toContain('Tailwind not detected')
+  })
+
   test('block-level display is not a line-box question', () => {
     const index = resolveCssClasses(project({
       'src/a.css': `

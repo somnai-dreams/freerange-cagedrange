@@ -9,7 +9,53 @@
 // with their paired line heights, utility layer ordering. A project with a custom theme is
 // outside this model — reports that rest on it say so as an assumption.
 
+import {existsSync, readdirSync, readFileSync} from 'node:fs'
+import {join} from 'node:path'
+
 export const edgeNames = ['left', 'right', 'top', 'bottom'] as const
+
+// Whether a project actually uses Tailwind. The vocabulary is only honest where Tailwind is
+// real: on a project that hand-writes `.mb-2 { margin-bottom: 10px }`, evaluating the token by
+// Tailwind's default scale would answer 8px with confidence — worse than not answering. So the
+// consumers gate on detection: package dependency, config file, or a stylesheet directive.
+export function detectTailwind(rootDirectory: string): {detected: boolean; evidence: string | null} {
+  const packagePath = join(rootDirectory, 'package.json')
+  if (existsSync(packagePath)) {
+    try {
+      const manifest = JSON.parse(readFileSync(packagePath, 'utf8')) as {
+        dependencies?: Record<string, string>
+        devDependencies?: Record<string, string>
+      }
+      if (manifest.dependencies?.['tailwindcss'] != null || manifest.devDependencies?.['tailwindcss'] != null) {
+        return {detected: true, evidence: 'tailwindcss in package.json'}
+      }
+    } catch {
+      // An unparsable manifest decides nothing; the other signals still can.
+    }
+  }
+  for (const name of ['tailwind.config.js', 'tailwind.config.ts', 'tailwind.config.cjs', 'tailwind.config.mjs']) {
+    if (existsSync(join(rootDirectory, name))) return {detected: true, evidence: name}
+  }
+  const skipped = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', 'out'])
+  const stylesheets: string[] = []
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, {withFileTypes: true})) {
+      if (entry.isDirectory()) {
+        if (!skipped.has(entry.name)) walk(join(directory, entry.name))
+      } else if (entry.name.endsWith('.css') && stylesheets.length < 50) {
+        stylesheets.push(join(directory, entry.name))
+      }
+    }
+  }
+  walk(rootDirectory)
+  for (const stylesheet of stylesheets) {
+    const source = readFileSync(stylesheet, 'utf8')
+    if (/@tailwind\s|@import\s+["']tailwindcss/.test(source)) {
+      return {detected: true, evidence: `Tailwind directive in ${stylesheet}`}
+    }
+  }
+  return {detected: false, evidence: null}
+}
 
 export type TokenClassification = {
   kind: 'geometry' | 'paint' | 'unknown'

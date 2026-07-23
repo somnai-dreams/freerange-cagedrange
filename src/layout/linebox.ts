@@ -40,19 +40,25 @@ type Merged = {
   has(property: string): boolean
 }
 
-export function checkLineBoxContainment(claim: LineBoxContainmentClaim, index: CssClassIndex): LineBoxCheck {
+export function checkLineBoxContainment(
+  claim: LineBoxContainmentClaim,
+  index: CssClassIndex,
+  options: {tailwind?: boolean} = {},
+): LineBoxCheck {
   const unknown = (reason: string): LineBoxCheck => ({kind: 'unknown', claim: claim.name, reason})
+  // Utility synthesis only applies where Tailwind is real: on a non-Tailwind project a
+  // look-alike name must not resolve to the default scale.
+  const tailwind = options.tailwind ?? true
 
   const synthesized = new Map<string, Map<string, TailwindDeclaration>>()
   for (const className of [...claim.context, ...claim.inline]) {
     const taint = index.tainted.get(className)
     if (taint != null) return unknown(`class '${className}' cannot be resolved: ${taint}`)
     if (!index.classes.has(className) && !index.shadowed.has(className)) {
-      // Not in any stylesheet: a bare Tailwind utility evaluates from the default scale, so
-      // claims work on utility-styled elements too. Anything unrecognized stays unknown.
-      const declarations = synthesizeTailwindClass(className)
+      const declarations = tailwind ? synthesizeTailwindClass(className) : null
       if (declarations == null) {
-        return unknown(`class '${className}' is not declared in any discovered stylesheet and is not a recognized Tailwind utility`)
+        return unknown(`class '${className}' is not declared in any discovered stylesheet`
+          + (tailwind ? ' and is not a recognized Tailwind utility' : ' (Tailwind not detected, so utilities are not assumed)'))
       }
       synthesized.set(className, declarations)
     }

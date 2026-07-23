@@ -126,6 +126,22 @@ export function Card({previewUrl, previewLoading, previewAspectRatio}) {
   })
 })
 
+describe('vocabulary gating', () => {
+  test('without Tailwind the className channels sit out and the style channel still runs', () => {
+    const source = `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'border p-2' : 'p-2'} style={{ height: open ? 240 : 120 }} />
+}
+`
+    const gated = auditStateGeometrySource('State.tsx', source, {tailwind: false})
+    expect(gated.findings.map(finding => finding.kind)).toEqual(['styleGeometry'])
+
+    const full = auditStateGeometrySource('State.tsx', source)
+    expect(full.findings.map(finding => finding.kind).sort()).toEqual(['branchGeometry', 'styleGeometry'])
+  })
+})
+
 describe('state-variant geometry scan', () => {
   test('a conditional border width is a finding; a reserved border varying only in color is clean', () => {
     const shifting = audit(`<button className={active ? 'border border-light-300' : ''} />`)

@@ -31,6 +31,14 @@ There's no API =). Your TypeScript code provides enough information for Freerang
 
 Pass a file path to `fr`, `fr --audit`, `fr --spacing`, or `fr --state-geometry` to filter down to that file's report. `fr --layout` instead accepts an optional layout-config path and otherwise searches upward for `freerange.layout.json`. `fr --help` prints this menu.
 
+Tailwind is a detected vocabulary, not an assumption: the scans that read utility tokens
+(`--spacing`, `--state-geometry`'s className channels, `--breakpoints`, line-box utility
+synthesis) apply Tailwind semantics only when the project declares Tailwind — the dependency in
+`package.json`, a `tailwind.config.*`, or a stylesheet directive. Without it they sit out with a
+printed reason rather than evaluating look-alike class names by a scale the project never chose;
+the vocabulary-free machinery (the style-attribute channel, plain-CSS resolution, line-box
+claims over real stylesheets) runs either way.
+
 `fr` directly uses TypeScript under the hood, so it naturally respects your `tsconfig`. We output TS errors before our analysis, so technically, you can swap out your explicit `tsc --noEmit` command for `fr` and nothing changes!
 
 ## Examples

@@ -425,13 +425,17 @@ export function compareComponentInstances(
 const classCombinerNames = new Set(['cn', 'clsx', 'cx', 'classnames', 'twmerge', 'twjoin'])
 const branchLimit = 16
 
-export function auditStateGeometrySource(file: string, source: string): StateGeometryFileAudit {
+export function auditStateGeometrySource(
+  file: string,
+  source: string,
+  options: {tailwind?: boolean} = {},
+): StateGeometryFileAudit {
   const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   const registry: ComponentRegistry = new Map()
   collectComponentTemplates(sourceFile, registry)
   const propIndex: PropLiteralIndex = new Map()
   collectPropLiterals(sourceFile, propIndex)
-  const audit = auditStateGeometryFile(sourceFile, registry, propIndex)
+  const audit = auditStateGeometryFile(sourceFile, registry, propIndex, options)
   audit.findings.push(...compareComponentInstances(audit.instances, registry))
   return audit
 }
@@ -440,7 +444,13 @@ export function auditStateGeometryFile(
   sourceFile: ts.SourceFile,
   registry?: ComponentRegistry,
   propIndex?: PropLiteralIndex,
+  options: {tailwind?: boolean} = {},
 ): StateGeometryFileAudit {
+  // Without Tailwind, className tokens have no vocabulary: evaluating them by the default scale
+  // on a project that hand-writes look-alike classes would answer wrongly with confidence. The
+  // className channels (branches, variants, instances, overlay containment) sit out; the
+  // style-attribute channel reads real values and needs no vocabulary, so it always runs.
+  const tailwind = options.tailwind ?? true
   const audit: StateGeometryFileAudit = {file: sourceFile.fileName, findings: [], coverage: [], instances: []}
   // The overlay flag travels down the JSX tree during the one visit pass (program-loaded source
   // files carry no parent pointers, so ancestry cannot be walked upward). An element's own
@@ -477,18 +487,18 @@ export function auditStateGeometryFile(
     if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
       for (const property of node.attributes.properties) {
         if (!ts.isJsxAttribute(property) || !ts.isIdentifier(property.name)) continue
-        if (property.name.text === 'className' || property.name.text === 'class') {
+        if (tailwind && (property.name.text === 'className' || property.name.text === 'class')) {
           auditClassAttribute(property, sourceFile, audit, propIndex, insideOverlay)
         } else if (property.name.text === 'style') {
           auditStyleAttribute(property, sourceFile, audit, {
             propIndex,
             resolveName,
-            insideOverlay: insideOverlay || elementAlwaysOutOfFlow(node),
+            insideOverlay: insideOverlay || (tailwind && elementAlwaysOutOfFlow(node)),
           })
         }
       }
     }
-    if (registry != null && (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
+    if (tailwind && registry != null && (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
       && ts.isIdentifier(node.tagName)) {
       const template = registry.get(node.tagName.text)
       if (template != null && template !== 'ambiguous') {
@@ -496,7 +506,7 @@ export function auditStateGeometryFile(
       }
     }
     if (ts.isJsxElement(node)) {
-      const overlayForChildren = insideOverlay || elementAlwaysOutOfFlow(node.openingElement)
+      const overlayForChildren = insideOverlay || (tailwind && elementAlwaysOutOfFlow(node.openingElement))
       visit(node.openingElement, insideOverlay)
       for (const child of node.children) visit(child, overlayForChildren)
       visit(node.closingElement, insideOverlay)

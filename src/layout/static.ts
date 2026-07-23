@@ -20,6 +20,7 @@ import {
   type LayoutExpression,
   type LayoutExpressionRange,
 } from './algebra.ts'
+import {detectTailwind} from '../tailwind/core.ts'
 import {resolveCssClasses} from './css.ts'
 import {checkLineBoxContainment, type LineBoxCheck} from './linebox.ts'
 import type {
@@ -104,14 +105,16 @@ export function runStaticLayoutSuite(suite: StaticLayoutSuite, configDirectory: 
 function runLineBoxClaims(suite: StaticLayoutSuite, configDirectory: string): LineBoxCheck[] {
   if (suite.lineBoxContainment.length === 0) return []
   const index = resolveCssClasses(configDirectory)
-  if (index.stylesheets.length === 0) {
+  const tailwind = detectTailwind(configDirectory)
+  if (index.stylesheets.length === 0 && !tailwind.detected) {
     return suite.lineBoxContainment.map(claim => ({
       kind: 'unknown' as const,
       claim: claim.name,
       reason: 'no stylesheets were discovered under the config directory',
     }))
   }
-  return suite.lineBoxContainment.map(claim => checkLineBoxContainment(claim, index))
+  return suite.lineBoxContainment.map(claim =>
+    checkLineBoxContainment(claim, index, {tailwind: tailwind.detected}))
 }
 
 function targetForConstraint(suite: StaticLayoutSuite, constraint: StaticLayoutConstraint): StaticLayoutTarget {

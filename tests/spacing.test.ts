@@ -864,6 +864,8 @@ function writeSpacingProject(directory: string, files: Record<string, string>): 
     compilerOptions: {strict: true, target: 'ESNext', module: 'ESNext', jsx: 'react-jsx'},
     include: ['**/*.ts', '**/*.tsx'],
   }))
+  // The fixtures simulate Tailwind projects; the scan gates on detection.
+  writeFileSync(join(directory, 'tailwind.config.js'), 'export default {}\n')
   writeProjectFiles(directory, files)
 }
 
@@ -923,6 +925,7 @@ test('fr --spacing <file> narrows the output to that file', () => {
 test('fr --spacing follows imports without type-checking and excludes non-project implementations', () => {
   const directory = mkdtempSync(join(tmpdir(), 'freerange-spacing-'))
   try {
+    writeFileSync(join(directory, 'tailwind.config.js'), 'export default {}\n')
     writeFileSync(join(directory, 'tsconfig.json'), JSON.stringify({
       compilerOptions: {
         strict: false,
