@@ -57,8 +57,14 @@ export function resolveCssClasses(rootDirectory: string): CssClassIndex {
   return index
 }
 
-const simpleClassPattern = /^\.([A-Za-z0-9_-]+)$/
-const classMentionPattern = /\.([A-Za-z0-9_-]+)/g
+// Class characters that must be escaped in selectors (Tailwind's mb-0\.5, w-1\/2) parse and
+// store unescaped, so claim class names match what authors write in JSX.
+const simpleClassPattern = /^\.((?:[A-Za-z0-9_-]|\\[./])+)$/
+const classMentionPattern = /\.((?:[A-Za-z0-9_-]|\\[./])+)/g
+
+function unescapeClassName(raw: string): string {
+  return raw.replaceAll(/\\([./])/g, '$1')
+}
 
 function parseStylesheet(source: string, file: string, index: CssClassIndex): void {
   const text = source.replaceAll(/\/\*[\s\S]*?\*\//g, ' ')
@@ -75,10 +81,11 @@ function parseStylesheet(source: string, file: string, index: CssClassIndex): vo
     const compounds = selector.split(/[\s>+~]+/).filter(part => part !== '')
     const subject = compounds[compounds.length - 1] ?? selector
     for (const match of subject.matchAll(classMentionPattern)) {
-      let perClass = index.shadowed.get(match[1]!)
+      const className = unescapeClassName(match[1]!)
+      let perClass = index.shadowed.get(className)
       if (perClass == null) {
         perClass = new Map()
-        index.shadowed.set(match[1]!, perClass)
+        index.shadowed.set(className, perClass)
       }
       for (const property of properties) {
         if (!perClass.has(property)) perClass.set(property, reason)
@@ -114,7 +121,7 @@ function parseStylesheet(source: string, file: string, index: CssClassIndex): vo
           shadow(selector, body, `also set by unsupported selector '${selector}' in ${file}`)
           continue
         }
-        const className = simple[1]!
+        const className = unescapeClassName(simple[1]!)
         if (insideConditional) {
           shadow(selector, body, `also set inside a conditional at-rule in ${file}`)
           continue

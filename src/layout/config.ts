@@ -37,8 +37,12 @@ function parseLineBoxClaim(value: unknown, path: string): LineBoxContainmentClai
   const classList = (raw: unknown, listPath: string): [string, ...string[]] => {
     const names = array(raw, listPath).map((name, index) => {
       const text = nonEmptyString(name, `${listPath}[${index}]`)
-      if (!/^[A-Za-z0-9_-]+$/.test(text)) {
-        throw new Error(`${listPath}[${index}] must be a bare class name (letters, numbers, underscores, hyphens).`)
+      // Dots and slashes admit Tailwind-style names (mb-0.5, w-1/2): the claim is expressible
+      // even when the class's geometry lives in generated CSS the resolver cannot see — that
+      // resolves to an honest unknown, not a parse rejection. Variant-gated names (md:mb-0.5)
+      // stay rejected: a conditionally-applied utility is not a constant claim input.
+      if (!/^[A-Za-z0-9_./-]+$/.test(text)) {
+        throw new Error(`${listPath}[${index}] must be a bare class name (letters, numbers, underscores, hyphens, dots, slashes; no variant colons).`)
       }
       return text
     })

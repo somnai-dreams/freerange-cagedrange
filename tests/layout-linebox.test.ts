@@ -148,6 +148,32 @@ describe('line-box containment', () => {
     if (check.kind === 'unknown') expect(check.reason).toContain('load order is unknown')
   })
 
+  test('Tailwind-style dotted names are expressible: escaped selectors resolve, generated-CSS classes are honest unknowns', () => {
+    // A hand-written escaped rule resolves and the fractional margin participates in the line.
+    const index = resolveCssClasses(project({
+      'src/a.css': `
+        .prompt-editable { font-size: 15px; line-height: 1.625; }
+        .chip { display: inline-flex; line-height: 23px; }
+        .mb-0\\.5 { margin-bottom: 2px; }
+      `,
+    }))
+    const check = checkLineBoxContainment(claim({name: 'chip margin', inline: ['chip', 'mb-0.5']}), index)
+    expect(check.kind).toBe('fail')
+    if (check.kind === 'fail') expect(check.boxPx).toBeCloseTo(25, 2)
+
+    // The same name with no stylesheet backing (a generated Tailwind utility) is an honest
+    // unknown, not a parse rejection.
+    const bare = resolveCssClasses(project({
+      'src/a.css': `
+        .prompt-editable { font-size: 15px; line-height: 1.625; }
+        .chip { display: inline-flex; line-height: 23px; }
+      `,
+    }))
+    const unresolved = checkLineBoxContainment(claim({name: 'chip margin', inline: ['chip', 'mb-0.5']}), bare)
+    expect(unresolved.kind).toBe('unknown')
+    if (unresolved.kind === 'unknown') expect(unresolved.reason).toContain("'mb-0.5' is not declared")
+  })
+
   test('block-level display is not a line-box question', () => {
     const index = resolveCssClasses(project({
       'src/a.css': `
