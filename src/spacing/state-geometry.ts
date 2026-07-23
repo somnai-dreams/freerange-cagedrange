@@ -71,11 +71,27 @@ export type ComponentInstance = {
 
 const holeToken = '\u0000className'
 
-// Which props of which components are only ever fed literals: `orientation="vertical"` at every
-// call site means no mounted element can transition between the branches that prop selects.
-export type PropLiteralIndex = Map<string, Map<string, 'literalOnly' | 'nonLiteral'>>
+// How props of components are fed across call sites. `literalOnly`: every call site fixes the
+// prop with a literal, so no mounted element can transition between the branches it selects.
+// `hookFed`: at least one call site feeds it an expression rooted in a hook binding — the prop
+// can change while that instance is mounted, so branches it gates are live. `nonLiteral`:
+// something else the bounded analysis cannot classify.
+export type PropLiteralIndex = Map<string, Map<string, 'literalOnly' | 'nonLiteral' | 'hookFed'>>
 
 export function collectPropLiterals(sourceFile: ts.SourceFile, index: PropLiteralIndex): void {
+  const bindings = localBindingIndex(sourceFile)
+  const feed = (attribute: ts.JsxAttribute): 'literalOnly' | 'nonLiteral' | 'hookFed' => {
+    if (jsxAttributeIsLiteral(attribute)) return 'literalOnly'
+    const initializer = attribute.initializer
+    if (initializer != null && ts.isJsxExpression(initializer) && initializer.expression != null) {
+      for (const name of discriminantRoots(initializer.expression)) {
+        if (name != null && bindings.get(name) === 'hook') return 'hookFed'
+      }
+    }
+    return 'nonLiteral'
+  }
+  // hookFed beats nonLiteral beats literalOnly: one live call site makes the prop live.
+  const strength = {literalOnly: 0, nonLiteral: 1, hookFed: 2} as const
   const visit = (node: ts.Node): void => {
     if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && ts.isIdentifier(node.tagName)
       && /^[A-Z]/.test(node.tagName.text)) {
@@ -86,12 +102,15 @@ export function collectPropLiterals(sourceFile: ts.SourceFile, index: PropLitera
       }
       for (const property of node.attributes.properties) {
         if (ts.isJsxAttribute(property) && ts.isIdentifier(property.name)) {
-          const literal = jsxAttributeIsLiteral(property)
+          const usage = feed(property)
           const previous = props.get(property.name.text)
-          props.set(property.name.text, literal && previous !== 'nonLiteral' ? 'literalOnly' : 'nonLiteral')
+          props.set(property.name.text,
+            previous == null || strength[usage] > strength[previous] ? usage : previous)
         } else {
           // A spread can feed any prop anything.
-          for (const key of props.keys()) props.set(key, 'nonLiteral')
+          for (const [key, previous] of props) {
+            if (strength[previous] < strength.nonLiteral) props.set(key, 'nonLiteral')
+          }
           props.set('\u0000spread', 'nonLiteral')
         }
       }
@@ -148,6 +167,10 @@ function classifyDiscriminants(
       if (enclosing != null && enclosing.props.has(name)) {
         const usage = propIndex?.get(enclosing.name)?.get(name)
         const spread = propIndex?.get(enclosing.name)?.has('\u0000spread') ?? false
+        if (usage === 'hookFed') {
+          mobileEvidence = `a call site feeds '${name}' from a hook`
+          continue
+        }
         if (usage === 'literalOnly' && !spread) {
           immobileEvidence = `every call site fixes '${name}' with a literal`
           continue

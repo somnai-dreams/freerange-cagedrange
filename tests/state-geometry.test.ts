@@ -157,6 +157,36 @@ describe('state-variant geometry scan', () => {
     expect(painted.findings).toEqual([])
   })
 
+  test('a prop fed from a hook at any call site makes its branches live', () => {
+    // The field-report shape: SrefThumb's discriminants are props, and the call site feeds them
+    // from hook state — the branches are live for that instance, so the severity is shift.
+    const source = (feeder: string) => auditStateGeometrySource('State.tsx', `
+export function Thumb({loading}) {
+  return <div style={{ aspectRatio: loading ? '1/1' : '16/9' }} />
+}
+export function Grid() {
+  ${feeder}
+  return <Thumb loading={busy} />
+}
+`)
+    const hookFed = source('const [busy, setBusy] = useState(false)')
+    expect(hookFed.findings).toHaveLength(1)
+    expect(hookFed.findings[0]).toMatchObject({kind: 'styleGeometry', severity: 'shift'})
+    expect(hookFed.findings[0]!.evidence).toContain("a call site feeds 'loading' from a hook")
+
+    // The same component with the prop fixed by literals everywhere stays configuration.
+    const literal = auditStateGeometrySource('State.tsx', `
+export function Thumb({loading}) {
+  return <div style={{ aspectRatio: loading ? '1/1' : '16/9' }} />
+}
+export function Grid() {
+  return <Thumb loading={false} />
+}
+`)
+    expect(literal.findings).toHaveLength(1)
+    expect(literal.findings[0]).toMatchObject({severity: 'config'})
+  })
+
   test('transform-only differences are motion, not shift; mixing in a box property restores shift', () => {
     // The slide-reveal idiom: hover moves pixels on screen but reflows nothing.
     const revealed = audit(`<button className="translate-x-14 group-hover:translate-x-0" />`)
