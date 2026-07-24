@@ -1617,7 +1617,9 @@ function compareBranchBoxes(
     const from = base.categorical.get(family)
     const to = other.categorical.get(family)
     if (from !== to) {
-      categorical.push(`${family} '${from ?? 'none'}' vs '${to ?? 'none'}'`)
+      // A missing family renders 'unset' (matching the style channel), never 'none': tokens like
+      // leading-none carry the literal value 'none', and "'none' vs 'none'" reads as no change.
+      categorical.push(`${family} '${from ?? 'unset'}' vs '${to ?? 'unset'}'`)
       keys.push(family)
       const fromPx = categoricalPixels(from)
       const toPx = categoricalPixels(to)

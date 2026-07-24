@@ -557,7 +557,7 @@ export function Card({profile}) {
     expect(child).toHaveLength(1)
     expect(child[0]!.severity).toBe('shift')
     expect(child[0]!.evidence).toContain("'isEditing' comes from a hook")
-    expect(child[0]!.detail).toContain("display 'flex' vs 'none'")
+    expect(child[0]!.detail).toContain("display 'flex' vs 'unset'")
   })
 
   test('token swaps between branch roots quantify when both sides resolve to pixels', () => {
@@ -872,7 +872,7 @@ export function Page() {
   test('dark-mode variants compare as their own dimension instead of merging with the base', () => {
     const dark = audit(`<div className={active ? 'border dark:border-2' : 'border'} />`)
     expect(dark.findings).toHaveLength(1)
-    expect(dark.findings[0]!.detail).toContain("dark:border-width '2px' vs 'none'")
+    expect(dark.findings[0]!.detail).toContain("dark:border-width '2px' vs 'unset'")
     expect(dark.findings[0]!.detail).not.toContain('inset')
   })
 })
