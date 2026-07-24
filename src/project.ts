@@ -24,8 +24,11 @@ import {
   collectComponentTemplates,
   collectPropLiterals,
   compareComponentInstances,
+  diffStateGeometryFindings,
   formatBreakpointReport,
+  formatStateGeometryDiff,
   formatStateGeometryReport,
+  parseStateGeometryReport,
   type BreakpointUsage,
   type ComponentRegistry,
   type PropLiteralIndex, stateGeometryReportData, breakpointReportData,} from './spacing/state-geometry.ts'
@@ -304,6 +307,26 @@ export function runFileStateGeometry(file: string, json = false): boolean {
     }
     console.log(formatStateGeometryReport([audit], instanceFindings))
   }
+  return false
+}
+
+// `fr --state-geometry-diff <base.json> <head.json>`: the PR battery's delta, first-class. Both
+// inputs are saved `--state-geometry --json` reports; findings match on the stable identity
+// (kind, file, detail, evidence, severity, anchor file — no line numbers), so unrelated edits
+// and anchor line shifts never read as churn. Advisory like the scan itself: informational
+// output, never a failing exit.
+export function runStateGeometryDiff(baseFile: string, headFile: string, json = false): boolean {
+  const load = (file: string) => {
+    const absolute = resolve(file)
+    if (!existsSync(absolute)) throw new Error(`File not found: ${absolute}`)
+    return parseStateGeometryReport(readFileSync(absolute, 'utf8'), file)
+  }
+  const base = load(baseFile)
+  const head = load(headFile)
+  const diff = diffStateGeometryFindings(base.findings, head.findings)
+  console.log(json
+    ? JSON.stringify({added: diff.added, resolved: diff.resolved})
+    : formatStateGeometryDiff(diff, base, head))
   return false
 }
 

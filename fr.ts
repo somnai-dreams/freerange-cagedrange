@@ -8,7 +8,7 @@
 // that narrows the output to that file. Layout takes an optional config path and is a CI
 // gate. Audit mode is informational and fails only on TypeScript errors. Spacing and
 // state-geometry modes read syntax only, so they never type-check and never fail.
-import {runFileAudit, runFileFindings, runFileSpacing, runFileStateGeometry, runProjectAll, runProjectAudit, runProjectBreakpoints, runProjectFindings, runProjectSpacing, runProjectStateGeometry} from './src/project.ts'
+import {runFileAudit, runFileFindings, runFileSpacing, runFileStateGeometry, runProjectAll, runProjectAudit, runProjectBreakpoints, runProjectFindings, runProjectSpacing, runProjectStateGeometry, runStateGeometryDiff} from './src/project.ts'
 import {runProjectLayout} from './src/layout/project.ts'
 import {formatTypeScriptDiagnostics, TypeScriptDiagnosticsError} from './src/typescript/diagnostics.ts'
 
@@ -18,6 +18,7 @@ const usage = `fr — freerange project checks
   fr --audit [file]                 numeric contracts per function (informational)
   fr --spacing [file]               spacing-ownership scan (advisory)
   fr --state-geometry [file] [--json]  state-conditional geometry in classNames and styles (advisory)
+  fr --state-geometry-diff <base.json> <head.json> [--json]  delta between two saved --json scans (advisory)
   fr --breakpoints [--json]         viewport thresholds the class tokens declare
   fr --layout [config]              source-linked layout contracts (gating)`
 
@@ -26,7 +27,7 @@ const rawArguments = process.argv.slice(2)
 // loud error rather than a silently ignored flag.
 const json = rawArguments.includes('--json')
 const arguments_ = rawArguments.filter(argument => argument !== '--json')
-const knownFlags = new Set(['--all', '--audit', '--spacing', '--state-geometry', '--breakpoints', '--layout'])
+const knownFlags = new Set(['--all', '--audit', '--spacing', '--state-geometry', '--state-geometry-diff', '--breakpoints', '--layout'])
 try {
   let failed: boolean
   if (arguments_[0] === '--help' || arguments_[0] === '-h') {
@@ -37,8 +38,9 @@ try {
   if (arguments_[0]?.startsWith('-') && !knownFlags.has(arguments_[0])) {
     throw new Error(`Unknown flag '${arguments_[0]}'.\n${usage}`)
   }
-  if (json && arguments_[0] !== '--state-geometry' && arguments_[0] !== '--breakpoints') {
-    throw new Error('--json is supported for --state-geometry and --breakpoints only.')
+  if (json && arguments_[0] !== '--state-geometry' && arguments_[0] !== '--state-geometry-diff'
+    && arguments_[0] !== '--breakpoints') {
+    throw new Error('--json is supported for --state-geometry, --state-geometry-diff, and --breakpoints only.')
   }
   if (arguments_[0] === '--all') {
     if (arguments_.length > 1) throw new Error('Usage: fr --all')
@@ -60,6 +62,9 @@ try {
     failed = arguments_.length === 1
       ? runProjectStateGeometry(process.cwd(), json)
       : runFileStateGeometry(arguments_[1]!, json)
+  } else if (arguments_[0] === '--state-geometry-diff') {
+    if (arguments_.length !== 3) throw new Error('Usage: fr --state-geometry-diff <base.json> <head.json> [--json]')
+    failed = runStateGeometryDiff(arguments_[1]!, arguments_[2]!, json)
   } else if (arguments_[0] === '--breakpoints') {
     if (arguments_.length > 1) throw new Error('Usage: fr --breakpoints [--json]')
     failed = runProjectBreakpoints(process.cwd(), json)

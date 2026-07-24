@@ -1693,12 +1693,8 @@ function sortFindings(findings: StateGeometryFinding[]): StateGeometryFinding[] 
     rank(right) - rank(left) || (right.magnitudePx ?? -1) - (left.magnitudePx ?? -1))
 }
 
-export function formatStateGeometryReport(
-  audits: StateGeometryFileAudit[],
-  instanceFindings: StateGeometryFinding[] = [],
-): string {
-  const data = stateGeometryReportData(audits, instanceFindings)
-  const kindText = (finding: StateGeometryFinding): string => {
+function formatFindingLine(finding: StateGeometryFinding): string {
+  const kindText = (): string => {
     switch (finding.kind) {
       case 'branchGeometry': return 'state changes geometry'
       case 'variantGeometry': return 'state variant changes geometry'
@@ -1707,14 +1703,167 @@ export function formatStateGeometryReport(
       case 'childGeometry': return 'conditional children change geometry'
     }
   }
-  const lines = data.findings.map(finding =>
-    `[${finding.severity}] ${finding.file}:${finding.line} ${kindText(finding)}: ${finding.detail}`
+  return `[${finding.severity}] ${finding.file}:${finding.line} ${kindText()}: ${finding.detail}`
     + `${finding.anchor == null ? '' : ` (vs ${finding.anchor.file}:${finding.anchor.line})`}`
-    + ` (${finding.evidence})`)
+    + ` (${finding.evidence})`
+}
+
+export function formatStateGeometryReport(
+  audits: StateGeometryFileAudit[],
+  instanceFindings: StateGeometryFinding[] = [],
+): string {
+  const data = stateGeometryReportData(audits, instanceFindings)
+  const lines = data.findings.map(formatFindingLine)
   lines.push(
     `state geometry: ${data.findings.length} finding${data.findings.length === 1 ? '' : 's'} `
     + `(${data.counts.shift} shift, ${data.counts.motion} motion, ${data.counts.unclear} unclear, ${data.counts.config} config); `
     + `${data.coverage} expression${data.coverage === 1 ? '' : 's'} partly dynamic`)
+  return lines.join('\n')
+}
+
+// Boundary parser for saved --json reports: the diff must fail loudly on malformed or
+// wrong-format input rather than diffing garbage. Every finding is rebuilt from validated
+// fields — nothing from the file is trusted by cast.
+export type ParsedStateGeometryReport = {
+  findings: StateGeometryFinding[]
+  tailwindDetected: boolean | null
+}
+
+export function parseStateGeometryReport(text: string, label: string): ParsedStateGeometryReport {
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    throw new Error(`${label} is not valid JSON`)
+  }
+  if (typeof raw !== 'object' || raw == null) throw new Error(`${label} is not a JSON object`)
+  const record = raw as Record<string, unknown>
+  const rawFindings = record['findings']
+  if (!Array.isArray(rawFindings)) {
+    throw new Error(`${label} is not a state-geometry --json report: it has no findings array`)
+  }
+  const parseKind = (value: unknown, index: number): StateGeometryFinding['kind'] => {
+    switch (value) {
+      case 'branchGeometry':
+      case 'variantGeometry':
+      case 'instanceGeometry':
+      case 'styleGeometry':
+      case 'childGeometry': return value
+      default: throw new Error(`${label}: finding ${index} has unknown kind ${JSON.stringify(value)}`)
+    }
+  }
+  const parseSeverity = (value: unknown, index: number): StateGeometryFinding['severity'] => {
+    switch (value) {
+      case 'shift':
+      case 'motion':
+      case 'unclear':
+      case 'config': return value
+      default: throw new Error(`${label}: finding ${index} has unknown severity ${JSON.stringify(value)}`)
+    }
+  }
+  const findings = rawFindings.map((value: unknown, index): StateGeometryFinding => {
+    if (typeof value !== 'object' || value == null) {
+      throw new Error(`${label}: finding ${index} is not an object`)
+    }
+    const finding = value as Record<string, unknown>
+    const file = finding['file']
+    const line = finding['line']
+    const detail = finding['detail']
+    const evidence = finding['evidence']
+    const magnitudePx = finding['magnitudePx']
+    if (typeof file !== 'string' || typeof line !== 'number' || typeof detail !== 'string'
+      || typeof evidence !== 'string' || (magnitudePx !== null && typeof magnitudePx !== 'number')) {
+      throw new Error(`${label}: finding ${index} is missing report fields`)
+    }
+    const rawAnchor = finding['anchor']
+    let anchor: {file: string; line: number} | null = null
+    if (rawAnchor != null) {
+      const anchorRecord = typeof rawAnchor === 'object' ? rawAnchor as Record<string, unknown> : null
+      const anchorFile = anchorRecord?.['file']
+      const anchorLine = anchorRecord?.['line']
+      if (typeof anchorFile !== 'string' || typeof anchorLine !== 'number') {
+        throw new Error(`${label}: finding ${index} has a malformed anchor`)
+      }
+      anchor = {file: anchorFile, line: anchorLine}
+    }
+    return {
+      file,
+      line,
+      kind: parseKind(finding['kind'], index),
+      detail,
+      magnitudePx,
+      severity: parseSeverity(finding['severity'], index),
+      evidence,
+      ...(anchor == null ? {} : {anchor}),
+    }
+  })
+  const tailwindDetected = record['tailwindDetected']
+  return {findings, tailwindDetected: typeof tailwindDetected === 'boolean' ? tailwindDetected : null}
+}
+
+// Cross-tree delta for the PR battery: two reports diff on the stable identity — kind, file,
+// detail, evidence, severity, and the anchor FILE — never on line numbers, which churn under
+// every unrelated edit. Multiset semantics, so two identical findings against one count as one
+// new and none resolved.
+export type StateGeometryDiff = {
+  added: StateGeometryFinding[]
+  resolved: StateGeometryFinding[]
+}
+
+function findingIdentity(finding: StateGeometryFinding): string {
+  return JSON.stringify([
+    finding.kind, finding.file, finding.detail, finding.evidence, finding.severity,
+    finding.anchor?.file ?? null,
+  ])
+}
+
+export function diffStateGeometryFindings(
+  base: StateGeometryFinding[],
+  head: StateGeometryFinding[],
+): StateGeometryDiff {
+  const unmatched = new Map<string, number>()
+  for (const finding of base) {
+    const key = findingIdentity(finding)
+    unmatched.set(key, (unmatched.get(key) ?? 0) + 1)
+  }
+  const added: StateGeometryFinding[] = []
+  for (const finding of head) {
+    const key = findingIdentity(finding)
+    const remaining = unmatched.get(key) ?? 0
+    if (remaining > 0) unmatched.set(key, remaining - 1)
+    else added.push(finding)
+  }
+  const resolved: StateGeometryFinding[] = []
+  for (const finding of base) {
+    const key = findingIdentity(finding)
+    const remaining = unmatched.get(key) ?? 0
+    if (remaining > 0) {
+      unmatched.set(key, remaining - 1)
+      resolved.push(finding)
+    }
+  }
+  return {added: sortFindings(added), resolved: sortFindings(resolved)}
+}
+
+export function formatStateGeometryDiff(
+  diff: StateGeometryDiff,
+  base: ParsedStateGeometryReport,
+  head: ParsedStateGeometryReport,
+): string {
+  const lines: string[] = []
+  if (base.tailwindDetected != null && head.tailwindDetected != null
+    && base.tailwindDetected !== head.tailwindDetected) {
+    lines.push('note: Tailwind detection differs between the two reports — className-channel '
+      + 'findings sat out on one side, so their delta reflects vocabulary, not the change under review')
+  }
+  const section = (title: string, findings: StateGeometryFinding[]): void => {
+    lines.push(`${findings.length} ${title} finding${findings.length === 1 ? '' : 's'}${findings.length === 0 ? '' : ':'}`)
+    for (const finding of findings) lines.push(formatFindingLine(finding))
+  }
+  section('new', diff.added)
+  section('resolved', diff.resolved)
+  lines.push(`state geometry diff: ${diff.added.length} new, ${diff.resolved.length} resolved `
+    + `(${base.findings.length} → ${head.findings.length} findings)`)
   return lines.join('\n')
 }
 

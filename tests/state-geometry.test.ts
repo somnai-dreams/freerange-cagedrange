@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'bun:test'
-import {auditStateGeometryFile, auditStateGeometrySource, breakpointReportData, classifyToken, collectBreakpoints, collectComponentTemplates, collectPropLiterals, compareComponentInstances, formatBreakpointReport, formatStateGeometryReport, stateGeometryReportData, type BreakpointUsage, type ComponentRegistry, type PropLiteralIndex} from '../src/spacing/state-geometry.ts'
+import {auditStateGeometryFile, auditStateGeometrySource, breakpointReportData, classifyToken, collectBreakpoints, collectComponentTemplates, collectPropLiterals, compareComponentInstances, diffStateGeometryFindings, formatBreakpointReport, formatStateGeometryDiff, formatStateGeometryReport, parseStateGeometryReport, stateGeometryReportData, type BreakpointUsage, type ComponentRegistry, type PropLiteralIndex} from '../src/spacing/state-geometry.ts'
 import * as ts from 'typescript'
 
 const audit = (jsx: string) => auditStateGeometrySource('State.tsx', `
@@ -457,6 +457,79 @@ export function Cards() {
     expect(classifyToken('border-light-100')).toMatchObject({kind: 'paint', family: 'border-color'})
     expect(classifyToken('hover:border')).toMatchObject({kind: 'geometry', variants: ['hover']})
     expect(classifyToken('rounded-full')).toMatchObject({kind: 'paint'})
+  })
+})
+
+describe('state-geometry diff', () => {
+  const reportOf = (source: string) =>
+    stateGeometryReportData([auditStateGeometrySource('/repo/src/S.tsx', source)], [], '/repo')
+
+  test('line shifts are not deltas; real geometry changes are', () => {
+    const source = `
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'border p-2' : 'p-2'} />
+}
+`
+    const base = reportOf(source)
+    const lineShifted = reportOf(`\n\n\n${source}`)
+    expect(diffStateGeometryFindings(base.findings, lineShifted.findings))
+      .toEqual({added: [], resolved: []})
+
+    const widened = reportOf(source.replace("'border p-2'", "'border p-8'"))
+    const diff = diffStateGeometryFindings(base.findings, widened.findings)
+    expect(diff.added).toHaveLength(1)
+    expect(diff.resolved).toHaveLength(1)
+    expect(diff.added[0]!.detail).toContain('25px')
+  })
+
+  test('anchor line churn is not a delta; a re-anchored pair is keyed by file only', () => {
+    const declaring = (padding: string): [string, string] => ['/repo/src/z.tsx', `${padding}
+export function Pill({className}: {className: string}) {
+  return <div className={\`px-2 border \${className}\`} />
+}
+export function Z() {
+  return <Pill className="mt-1" />
+}
+`]
+    const using: [string, string] = ['/repo/src/a.tsx', `
+import {Pill} from './Pill'
+export function A() {
+  return <Pill className="mt-4" />
+}
+`]
+    const resolve = (specifier: string) => specifier === './Pill' ? '/repo/src/z.tsx' : null
+    const report = (files: Array<[string, string]>) => {
+      const {audits, instanceFindings} = auditProject(files, resolve)
+      return stateGeometryReportData(audits, instanceFindings, '/repo')
+    }
+    const base = report([declaring(''), using])
+    const churned = report([declaring('\n\n\n'), using])
+    expect(diffStateGeometryFindings(base.findings, churned.findings))
+      .toEqual({added: [], resolved: []})
+  })
+
+  test('reports round-trip through the boundary parser; garbage fails loudly', () => {
+    const data = reportOf(`
+export function Panel() {
+  const [open, setOpen] = useState(false)
+  return <div className={open ? 'border p-2' : 'p-2'} />
+}
+`)
+    const parsed = parseStateGeometryReport(JSON.stringify({...data, tailwindDetected: true}), 'base.json')
+    expect(parsed.findings).toEqual(data.findings)
+    expect(parsed.tailwindDetected).toBe(true)
+
+    expect(() => parseStateGeometryReport('not json', 'base.json')).toThrow('not valid JSON')
+    expect(() => parseStateGeometryReport('{"coverage": 3}', 'base.json')).toThrow('no findings array')
+    expect(() => parseStateGeometryReport(
+      JSON.stringify({findings: [{file: 'a.tsx'}]}), 'base.json')).toThrow('finding 0')
+
+    const diffText = formatStateGeometryDiff(
+      diffStateGeometryFindings(parsed.findings, []), parsed, {findings: [], tailwindDetected: true})
+    expect(diffText).toContain('0 new findings')
+    expect(diffText).toContain('1 resolved finding:')
+    expect(diffText).toContain('state geometry diff: 0 new, 1 resolved (1 → 0 findings)')
   })
 })
 

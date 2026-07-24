@@ -757,6 +757,43 @@ test('state-geometry names the resolved project root, making tsconfig walk-up vi
   }
 })
 
+test('state-geometry-diff compares two saved reports and rejects malformed input loudly', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'freerange-state-geometry-diff-'))
+  try {
+    const finding = {
+      file: 'src/App.tsx',
+      line: 4,
+      kind: 'styleGeometry',
+      detail: "style height '240' vs '120'",
+      magnitudePx: 120,
+      severity: 'shift',
+      evidence: "'active' comes from a hook",
+    }
+    writeFileSync(join(directory, 'base.json'), JSON.stringify({findings: [], coverage: 0,
+      counts: {shift: 0, motion: 0, unclear: 0, config: 0}, tailwindDetected: true}))
+    writeFileSync(join(directory, 'head.json'), JSON.stringify({findings: [finding], coverage: 0,
+      counts: {shift: 1, motion: 0, unclear: 0, config: 0}, tailwindDetected: true}))
+
+    const diff = runCli(directory, '--state-geometry-diff', 'base.json', 'head.json')
+    expect(diff.exitCode).toBe(0)
+    expect(diff.stdout).toContain('1 new finding:')
+    expect(diff.stdout).toContain("[shift] src/App.tsx:4 state changes style geometry: style height '240' vs '120'")
+    expect(diff.stdout).toContain('state geometry diff: 1 new, 0 resolved (0 → 1 findings)')
+
+    const jsonDiff = runCli(directory, '--state-geometry-diff', 'base.json', 'head.json', '--json')
+    const parsed = JSON.parse(jsonDiff.stdout) as {added: unknown[]; resolved: unknown[]}
+    expect(parsed.added).toHaveLength(1)
+    expect(parsed.resolved).toHaveLength(0)
+
+    writeFileSync(join(directory, 'garbage.json'), 'not a report')
+    const malformed = runCli(directory, '--state-geometry-diff', 'base.json', 'garbage.json')
+    expect(malformed.exitCode).toBe(1)
+    expect(malformed.stderr).toContain('garbage.json is not valid JSON')
+  } finally {
+    rmSync(directory, {recursive: true, force: true})
+  }
+})
+
 test('targeted fr has fallback options while project commands require a tsconfig', () => {
   const directory = mkdtempSync(join(tmpdir(), 'freerange-no-config-'))
   try {
