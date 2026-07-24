@@ -171,3 +171,69 @@ conditional-child model (`{showExtra && <button className="h-8"/>}` already reje
 intrinsicBlockSize contracts) imported into the scan's per-site claim — the machinery
 half-exists, it just isn't wired to this syntax form. Note the discriminant liveness rule
 already handles the rest (`isEditing` is a useState — live while mounted → shift).
+
+## Resolution (2026-07-24): all five items above landed, validated on the same tree
+
+Commits `a0b58fa..c10680b` on this branch. What changed and what the re-run over the same
+mj-gallery checkout measured:
+
+1. **Registry conflation** → instances resolve their tag to a referent (local declaration,
+   named/aliased/default import through TS module resolution) and group by declaring module +
+   name; unknown referents make no claim; `'ambiguous'` now means a name declared twice in one
+   module and actually fires. Re-run: `<Pill>` instance findings **110 → 14** (the exact false
+   set from the battery), Spinner 22 → 2, Popover 17 → 6, SearchIcon 7 → 1; total
+   instanceGeometry 177 → 65, with ImagePill and Panel newly compared because import
+   resolution now finds their true templates.
+2. **Anchor instability** → lexicographically smallest file, then earliest line, anchors each
+   group, and the finding carries a structured `anchor: {file, line}`; the detail no longer
+   embeds `(vs file:line)` at all (the text report composes it from the pair). All 177 old
+   findings embedded path:line text; zero new ones do. The delta is also first-class now:
+   `fr --state-geometry-diff <base.json> <head.json>` matches on (kind, file, detail, evidence,
+   severity, anchor file) with multiset semantics — no more `:\d+` stripping.
+3. **tsconfig walk-up** → both formats head with the resolved root (`project: <root>` plus a
+   "resolved upward from the working directory" marker; `projectRoot` in JSON).
+4. **Miss 3** → new `childGeometry` kind: element-level conditional children compare their
+   branch ROOTs' className tokens and modeled style literals like className branches, same
+   severity and overlay rules (an `&&` absent arm is vacuously out of flow); unreadable
+   branches are `dynamicChildBranch` coverage. The HoverMoodboard repro is a regression test
+   and fires as shift. Categorical px-vs-px pairs (h-7 vs h-4, text-sm vs text-lg) now carry
+   real magnitudes. On this tree the channel debuts with 958 findings
+   (136 shift / 334 unclear / 481 motion / 7 config) — skim below.
+
+Note for battery scripts: the `--json` shape changed (structured `anchor`, `projectRoot`, new
+kind and coverage reason, no paths inside details, absent categorical sides render 'unset'
+rather than 'none'), so the first post-upgrade diff is a one-time re-baseline.
+
+## childGeometry skim (2026-07-24): 12 sampled findings verified against source
+
+Stratified sample (top-magnitude + random shifts, random unclear/motion) read against the
+actual JSX by a verification pass: **9 TRUE, 3 MISLEADING, 0 WRONG**. The channel's claims are
+syntactically sound; every misleading case was a model-scope boundary, and two were fixable
+same-day:
+
+- **Fixed — pair discriminant over-attribution.** In `live ? <V/> : mode ? <A/> : <B/>`, the
+  A/B pair was inheriting `live`'s hook evidence and reading as shift. Arms now carry their
+  condition PATH and each pair classifies only the conditions from where the paths diverge;
+  the PromptSettings.tsx pair demoted shift → unclear and its evidence names the true
+  discriminant. (Sample-wide effect small — 136 → 135 shifts — the over-attribution is rare.)
+- **Fixed — detail vocabulary collisions.** Absent categorical sides rendered 'none', colliding
+  with `leading-none`'s literal value ("leading 'none' vs 'none'" was a real diff reading as
+  no change) — now 'unset'. The border+padding edge aggregate renamed "content inset"
+  ("left content inset -13px") so it no longer collides with the CSS offset families
+  ("inset '0px'", "bottom '8px'").
+- **Recorded — sibling-complement chains.** `{a && <X/>}{!a && <Y/>}` (and status-type chains
+  like creditModal's idle/confirm/loading arms) read as N independent appear/disappear claims,
+  but an adjacent sibling always takes the vacated place: the real delta is X-vs-Y, not
+  X-vs-nothing. Extension: pair adjacent conditional children whose conditions are
+  syntactic complements (or literal-discriminated on the same roots) and compare their roots
+  like ternary arms. Until then these report with honest geometry but overstated framing.
+- **Recorded — component boundaries hide out-of-flow ancestors.** creditModal's conditional
+  sits inside `<ModalBase>`, whose own root is `fixed`; the overlay flag only travels within
+  one file's JSX, so the finding tiers as shift instead of motion. Extension: the component
+  registry could record "root always out of flow, renders children inside it" and let
+  instances propagate containment to their children — the same registry machinery the
+  instance channel already builds.
+
+Verdict on the channel: keep it. 481 of 958 findings are correctly demoted overlay motion,
+the shift tier surfaced real swaps (Accordion open/close, IdeasPoll states, FoldersMenu
+title-edit — the Miss 3 class exactly), and nothing sampled was outright wrong.
