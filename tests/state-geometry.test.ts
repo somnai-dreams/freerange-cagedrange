@@ -147,7 +147,7 @@ describe('state-variant geometry scan', () => {
     const shifting = audit(`<button className={active ? 'border border-light-300' : ''} />`)
     expect(shifting.findings).toHaveLength(1)
     expect(shifting.findings[0]).toMatchObject({kind: 'branchGeometry'})
-    expect(shifting.findings[0]!.detail).toContain('left inset -1px')
+    expect(shifting.findings[0]!.detail).toContain('left content inset -1px')
     expect(shifting.findings[0]!.magnitudePx).toBe(1)
 
     const reserved = audit("<button className={`border ${active ? 'border-light-300' : 'border-transparent'}`} />")
@@ -341,13 +341,13 @@ export function Panel() {
     // `border border-b-0`: the single-edge utility wins its edge, so only the bottom differs.
     const reset = audit(`<div className={active ? 'border border-b-0' : 'border'} />`)
     expect(reset.findings).toHaveLength(1)
-    expect(reset.findings[0]!.detail).toContain('bottom inset +1px')
+    expect(reset.findings[0]!.detail).toContain('bottom content inset +1px')
     expect(reset.findings[0]!.detail).not.toContain('left inset')
 
     // The important marker beats a plain base token regardless of order.
     const important = audit(`<div className={active ? 'border-l-0! border-l' : 'border-l'} />`)
     expect(important.findings).toHaveLength(1)
-    expect(important.findings[0]!.detail).toContain('left inset +1px')
+    expect(important.findings[0]!.detail).toContain('left content inset +1px')
 
     // Equal targeting with distinct values depends on stylesheet order: honestly unresolved,
     // and identical unresolved conflicts on both sides stay clean.
@@ -377,7 +377,7 @@ export function Page({transition}: {transition: string}) {
     const instance = result.findings.filter(finding => finding.kind === 'instanceGeometry')
     expect(instance).toHaveLength(1)
     expect(instance[0]!.detail).toContain('<Shell> instances disagree')
-    expect(instance[0]!.detail).toContain('left inset +1px')
+    expect(instance[0]!.detail).toContain('left content inset +1px')
     expect(instance[0]!.magnitudePx).toBe(1)
     // The call site overrides border-l, geometry the shell itself declares.
     expect(instance[0]!.severity).toBe('shift')
@@ -839,7 +839,7 @@ describe('per-interval responsive evaluation', () => {
     const scoped = audit(`<div className={active ? 'p-2' : 'p-2 md:p-4'} />`)
     expect(scoped.findings).toHaveLength(1)
     expect(scoped.findings[0]!.detail).toBe(
-      'state shifts layout from 768px: left inset +8px, right inset +8px, top inset +8px, bottom inset +8px',
+      'state shifts layout from 768px: left content inset +8px, right content inset +8px, top content inset +8px, bottom content inset +8px',
     )
 
     // Below the threshold the branches agree; identical responsive tokens are not a conflict.

@@ -883,43 +883,64 @@ function literalPixels(value: StyleValue): number | null {
 // out of scope (their own attributes are audited when the walk reaches them). A branch that is
 // neither an element nor provably empty — a fragment, a mapped list, a variable — is a
 // dynamicChildBranch coverage record, never a guess.
+//
+// Each arm records its condition PATH — the (condition, polarity) steps that select it inside a
+// nested conditional. A pair of arms is discriminated only by the conditions from where their
+// paths diverge: in `live ? <V/> : mode ? <A/> : <B/>`, the A/B pair is gated by `mode` alone,
+// and a hook feeding `live` must not make that pair read as a live shift.
+type ChildArmStep = {condition: ts.Expression; whenTrue: boolean}
 type ChildArm =
-  | {kind: 'element'; opening: ts.JsxOpeningElement | ts.JsxSelfClosingElement}
-  | {kind: 'absent'}
-  | {kind: 'opaque'}
+  | {kind: 'element'; opening: ts.JsxOpeningElement | ts.JsxSelfClosingElement; path: ChildArmStep[]}
+  | {kind: 'absent'; path: ChildArmStep[]}
+  | {kind: 'opaque'; path: ChildArmStep[]}
 
-function flattenChildArms(expression: ts.Expression, conditions: ts.Expression[], arms: ChildArm[]): void {
+// Conditions that discriminate between two arms: everything on either path at or below their
+// first divergence. The shared prefix above it selects the whole subtree containing both arms,
+// so changing it cannot swap one for the other.
+function pairDiscriminants(left: ChildArm, right: ChildArm): ts.Expression[] {
+  let shared = 0
+  while (shared < left.path.length && shared < right.path.length) {
+    const a = left.path[shared]!
+    const b = right.path[shared]!
+    if (a.condition !== b.condition || a.whenTrue !== b.whenTrue) break
+    shared++
+  }
+  const conditions: ts.Expression[] = []
+  for (const step of [...left.path.slice(shared), ...right.path.slice(shared)]) {
+    if (!conditions.includes(step.condition)) conditions.push(step.condition)
+  }
+  return conditions
+}
+
+function flattenChildArms(expression: ts.Expression, path: ChildArmStep[], arms: ChildArm[]): void {
   if (arms.length >= branchLimit) return
   const unwrapped = ts.isParenthesizedExpression(expression) ? expression.expression : expression
   if (ts.isConditionalExpression(unwrapped)) {
-    conditions.push(unwrapped.condition)
-    flattenChildArms(unwrapped.whenTrue, conditions, arms)
-    flattenChildArms(unwrapped.whenFalse, conditions, arms)
+    flattenChildArms(unwrapped.whenTrue, [...path, {condition: unwrapped.condition, whenTrue: true}], arms)
+    flattenChildArms(unwrapped.whenFalse, [...path, {condition: unwrapped.condition, whenTrue: false}], arms)
     return
   }
   if (ts.isBinaryExpression(unwrapped)) {
     const operator = unwrapped.operatorToken.kind
     if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
-      conditions.push(unwrapped.left)
-      flattenChildArms(unwrapped.right, conditions, arms)
-      arms.push({kind: 'absent'})
+      flattenChildArms(unwrapped.right, [...path, {condition: unwrapped.left, whenTrue: true}], arms)
+      arms.push({kind: 'absent', path: [...path, {condition: unwrapped.left, whenTrue: false}]})
       return
     }
     if (operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken) {
-      conditions.push(unwrapped.left)
-      flattenChildArms(unwrapped.left, conditions, arms)
-      flattenChildArms(unwrapped.right, conditions, arms)
+      flattenChildArms(unwrapped.left, [...path, {condition: unwrapped.left, whenTrue: true}], arms)
+      flattenChildArms(unwrapped.right, [...path, {condition: unwrapped.left, whenTrue: false}], arms)
       return
     }
-    arms.push({kind: 'opaque'})
+    arms.push({kind: 'opaque', path})
     return
   }
   if (ts.isJsxElement(unwrapped)) {
-    arms.push({kind: 'element', opening: unwrapped.openingElement})
+    arms.push({kind: 'element', opening: unwrapped.openingElement, path})
     return
   }
   if (ts.isJsxSelfClosingElement(unwrapped)) {
-    arms.push({kind: 'element', opening: unwrapped})
+    arms.push({kind: 'element', opening: unwrapped, path})
     return
   }
   // Renders nothing: null, undefined, booleans, and the empty string.
@@ -927,10 +948,10 @@ function flattenChildArms(expression: ts.Expression, conditions: ts.Expression[]
     || unwrapped.kind === ts.SyntaxKind.TrueKeyword || unwrapped.kind === ts.SyntaxKind.FalseKeyword
     || (ts.isIdentifier(unwrapped) && unwrapped.text === 'undefined')
     || (ts.isStringLiteralLike(unwrapped) && unwrapped.text === '')) {
-    arms.push({kind: 'absent'})
+    arms.push({kind: 'absent', path})
     return
   }
-  arms.push({kind: 'opaque'})
+  arms.push({kind: 'opaque', path})
 }
 
 function auditConditionalChild(
@@ -953,9 +974,8 @@ function auditConditionalChild(
       || unwrapped.operatorToken.kind === ts.SyntaxKind.BarBarToken
       || unwrapped.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken))
   if (!conditionalForm) return
-  const conditions: ts.Expression[] = []
   const arms: ChildArm[] = []
-  flattenChildArms(unwrapped, conditions, arms)
+  flattenChildArms(unwrapped, [], arms)
   const line = sourceFile.getLineAndCharacterOfPosition(container.getStart(sourceFile)).line + 1
   if (arms.some(arm => arm.kind === 'opaque')) {
     audit.coverage.push({file: audit.file, line, reason: 'dynamicChildBranch'})
@@ -992,7 +1012,6 @@ function auditConditionalChild(
     return branches?.[0] ?? new Map()
   }
 
-  const {mobility, evidence} = classifyDiscriminants(conditions, container, sourceFile, context.propIndex)
   // An absent arm is vacuously bounded: nothing in flow. An element arm is bounded when it is
   // out of normal flow in every branch of its own className — an appearing overlay cannot
   // displace a sibling, however live its discriminant.
@@ -1002,6 +1021,8 @@ function auditConditionalChild(
   for (let index = 1; index < compared.length; index++) {
     const other = compared[index]!
     if (base.kind === 'absent' && other.kind === 'absent') continue
+    const {mobility, evidence} = classifyDiscriminants(
+      pairDiscriminants(base, other), container, sourceFile, context.propIndex)
     const involvesAbsent = base.kind === 'absent' || other.kind === 'absent'
     const selfBounded = armBounded(base) && armBounded(other)
     const bounded = selfBounded || context.insideOverlay
@@ -1598,7 +1619,10 @@ function compareBranchBoxes(
       else inset += otherCell - baseCell
     }
     if (inset !== 0) {
-      shifts.push(`${edge} inset ${signed(inset)}px`)
+      // "content inset", not bare "inset": this aggregate is the border+padding displacement of
+      // the content edge, and bare "inset" collides with the CSS inset/top/bottom offset
+      // families that print categorically ("inset '0px'", "bottom '8px'").
+      shifts.push(`${edge} content inset ${signed(inset)}px`)
       magnitude = Math.max(magnitude, Math.abs(inset))
     }
     if (margin !== 0) {
